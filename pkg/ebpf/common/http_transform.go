@@ -398,12 +398,16 @@ func HTTPInfoEventToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo) (reques
 	if parseCtx != nil && !parseCtx.payloadExtraction.Enabled() {
 		// There's no need to parse HTTP headers/body,
 		// create the span directly.
-		return httpRequestToSpan(event, requestBuffer), false, nil
+		span := httpRequestToSpan(event, requestBuffer)
+		captureHTTPPayloads(&span, requestBuffer, responseBuffer, parseCtx.payloadExtraction.RecordPayloads)
+		return span, false, nil
 	}
 
 	if !hasResponse {
 		// Large buffers disabled
-		return httpRequestToSpan(event, requestBuffer), false, nil
+		span := httpRequestToSpan(event, requestBuffer)
+		captureHTTPPayloads(&span, requestBuffer, responseBuffer, parseCtx != nil && parseCtx.payloadExtraction.RecordPayloads)
+		return span, false, nil
 	}
 
 	// http.ReadRequest requires a *bufio.Reader; that one allocation is unavoidable.
@@ -412,7 +416,9 @@ func HTTPInfoEventToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo) (reques
 	resp, err2 := httpSafeParseResponse(responseBuffer, req)
 	if err != nil || err2 != nil {
 		slog.Debug("error while parsing http request or response, falling back to manual HTTP info parsing", "reqErr", err, "respErr", err2)
-		return httpRequestToSpan(event, requestBuffer), false, nil
+		span := httpRequestToSpan(event, requestBuffer)
+		captureHTTPPayloads(&span, requestBuffer, responseBuffer, parseCtx != nil && parseCtx.payloadExtraction.RecordPayloads)
+		return span, false, nil
 	}
 
 	// When the body is empty but Content-Length indicates data should be
@@ -427,7 +433,21 @@ func HTTPInfoEventToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo) (reques
 		recoverRequestBody(req, requestBuffer)
 	}
 
-	return httpRequestResponseToSpan(parseCtx, event, req, resp), false, nil
+	span := httpRequestResponseToSpan(parseCtx, event, req, resp)
+	captureHTTPPayloads(&span, requestBuffer, responseBuffer, parseCtx != nil && parseCtx.payloadExtraction.RecordPayloads)
+	return span, false, nil
+}
+
+func captureHTTPPayloads(span *request.Span, requestBuffer, responseBuffer *largebuf.LargeBuffer, enabled bool) {
+	if !enabled {
+		return
+	}
+	if requestBuffer != nil {
+		span.SoftprobeRequestPayload = append([]byte(nil), requestBuffer.UnsafeView()...)
+	}
+	if responseBuffer != nil {
+		span.SoftprobeResponsePayload = append([]byte(nil), responseBuffer.UnsafeView()...)
+	}
 }
 
 func recoverRequestBody(req *http.Request, requestBuffer *largebuf.LargeBuffer) {

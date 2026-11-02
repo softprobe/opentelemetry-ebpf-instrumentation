@@ -91,6 +91,7 @@ func TestRuntimeToV2DefaultConfig(t *testing.T) {
 	require.Equal(t, false, value(t, ext.Capture.Instrumentation, "dns", "enabled", "traces"))
 	require.Equal(t, false, value(t, ext.Capture.Instrumentation, "dns", "enabled", "metrics"))
 	require.ElementsMatch(t, []string{
+		"record_payloads",
 		string(protocolHTTP),
 		string(protocolGRPC),
 		string(protocolSQL),
@@ -597,6 +598,7 @@ func TestRuntimeToV2AdvancedCaptureParity(t *testing.T) {
 		"srtt": {GreaterThan: &gt},
 	}
 
+	cfg.EBPF.PayloadExtraction.RecordPayloads = true
 	cfg.EBPF.PayloadExtraction.HTTP.GraphQL.Enabled = true
 	cfg.EBPF.PayloadExtraction.HTTP.Elasticsearch.Enabled = true
 	cfg.EBPF.PayloadExtraction.HTTP.AWS.Enabled = true
@@ -687,6 +689,7 @@ func TestRuntimeToV2AdvancedCaptureParity(t *testing.T) {
 	require.Equal(t, cfg.EBPF.PayloadExtraction.HTTP.Enrichment.Rules, value(t, ext.Capture.Instrumentation, "http", "payload_extraction", "enrichment", "rules"))
 
 	require.Equal(t, schema.CIDRDefinitions{{CIDR: "10.0.0.0/8", Name: "private"}}, value(t, ext.Capture.Network, "capture", "selection", "cidrs"))
+	require.Equal(t, true, value(t, ext.Capture.Instrumentation, "record_payloads"))
 	require.Equal(t, cfg.NetworkFlows.GuessPorts, value(t, ext.Capture.Network, "capture", "flow_lifecycle", "guess_ports"))
 	require.Equal(t, "/var/lib/ipinfo.mmdb", value(t, ext.Capture.Network, "capture", "enrichment", "geo_ip", "ipinfo", "path"))
 	require.Equal(t, "/var/lib/country.mmdb", value(t, ext.Capture.Network, "capture", "enrichment", "geo_ip", "maxmind", "country_path"))

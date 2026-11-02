@@ -220,6 +220,18 @@ func TestJVMBPFMapsAreInternallyPinnedAndUseSharedEventsRingBuffer(t *testing.T)
 	assert.Equal(t, ebpfconvenience.PinInternal, spec.Maps["ringbuf_write_stats_storage"].Pinning)
 }
 
+func TestSoftprobeRequestContextMapIsPinnedWithStableABI(t *testing.T) {
+	spec, err := LoadBpf()
+	require.NoError(t, err)
+
+	contextMap, ok := spec.Maps["sp_request_ctx_v1"]
+	require.True(t, ok)
+	assert.Equal(t, ebpf.LRUHash, contextMap.Type)
+	assert.Equal(t, ebpf.PinByName, contextMap.Pinning)
+	assert.Equal(t, uint32(20), contextMap.KeySize)
+	assert.Equal(t, uint32(56), contextMap.ValueSize)
+}
+
 func TestRingbufMetricsConstant(t *testing.T) {
 	tracer := New(nil, &obi.Config{}, imetrics.NoopReporter{})
 	assert.Equal(t, false, tracer.constants()["ringbuf_metrics_enabled"])

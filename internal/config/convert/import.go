@@ -1224,6 +1224,7 @@ func applyV2Instrumentation(cfg *obi.Config, instrumentation schema.Instrumentat
 }
 
 func applyFullV2Instrumentation(cfg *obi.Config, instrumentation schema.Instrumentation) {
+	cfg.EBPF.PayloadExtraction.RecordPayloads = instrumentation.RecordPayloads
 	applyFullV2HTTPInstrumentation(cfg, instrumentation.HTTP)
 
 	cfg.EBPF.HeuristicSQLDetect = instrumentation.SQL.HeuristicDetect
@@ -1251,6 +1252,9 @@ func applyFullV2Instrumentation(cfg *obi.Config, instrumentation schema.Instrume
 }
 
 func applyPartialV2Instrumentation(cfg *obi.Config, instrumentation schema.Instrumentation) {
+	if instrumentation.RecordPayloads {
+		cfg.EBPF.PayloadExtraction.RecordPayloads = true
+	}
 	if !zeroValue(instrumentation.HTTP) {
 		applyPartialV2HTTPInstrumentation(cfg, instrumentation.HTTP)
 	}

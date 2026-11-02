@@ -184,16 +184,17 @@ func captureInstrumentation(cfg *obi.Config) schema.Instrumentation {
 	}
 
 	return schema.Instrumentation{
-		HTTP:      httpInstrumentation,
-		GRPC:      protocols[protocolGRPC],
-		SQL:       sqlInstrumentation,
-		Redis:     redisInstrumentation,
-		Kafka:     kafkaInstrumentation,
-		Mongo:     mongoInstrumentation,
-		Couchbase: couchbaseInstrumentation,
-		DNS:       dnsInstrumentation,
-		GPU:       gpuInstrumentation,
-		Aerospike: &aerospikeInstrumentation,
+		RecordPayloads: cfg.EBPF.PayloadExtraction.RecordPayloads,
+		HTTP:           httpInstrumentation,
+		GRPC:           protocols[protocolGRPC],
+		SQL:            sqlInstrumentation,
+		Redis:          redisInstrumentation,
+		Kafka:          kafkaInstrumentation,
+		Mongo:          mongoInstrumentation,
+		Couchbase:      couchbaseInstrumentation,
+		DNS:            dnsInstrumentation,
+		GPU:            gpuInstrumentation,
+		Aerospike:      &aerospikeInstrumentation,
 	}
 }
 

@@ -20,6 +20,7 @@
 #include <common/ringbuf.h>
 #include <common/runtime.h>
 #include <common/scratch_mem.h>
+#include <common/softprobe_request_context.h>
 #include <common/trace_helpers.h>
 #include <common/trace_lifecycle.h>
 #include <common/trace_parent.h>
@@ -566,6 +567,9 @@ __obi_continue_protocol_http_tp(struct pt_regs *ctx,
                                        args->orig_dport,
                                        0,
                                        BPF_ANY);
+                if (meta->type == k_event_type_http_client) {
+                    softprobe_store_request_context(&args->pid_conn.conn, &tp_p->tp);
+                }
             }
             goto done;
         }
@@ -634,6 +638,9 @@ __obi_continue_protocol_http_tp(struct pt_regs *ctx,
                                args->orig_dport,
                                0,
                                BPF_ANY);
+        if (meta->type == k_event_type_http_client) {
+            softprobe_store_request_context(&args->pid_conn.conn, &tp_p->tp);
+        }
     }
 
 done:
@@ -687,6 +694,7 @@ __obi_continue_protocol_http(struct pt_regs *ctx,
         // we've already got a tp_info_pid_t setup by the sockmsg program, use
         // that instead
         set_trace_info_for_connection(&args->pid_conn.conn, TRACE_TYPE_CLIENT, tp_p);
+        softprobe_store_request_context(&args->pid_conn.conn, &tp_p->tp);
         // clean up so that TC does not pick it up
         bpf_map_delete_elem(&outgoing_trace_map, &e_key);
         goto skip_tp;

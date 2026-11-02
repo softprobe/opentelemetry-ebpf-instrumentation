@@ -2,10 +2,10 @@
 # CMD: Default binary name is now "obi" (OpenTelemetry eBPF Instrumentation)
 CMD ?= obi
 JAVA_AGENT ?= obi-java-agent.jar
-MAIN_GO_FILE ?= cmd/$(CMD)/main.go
+MAIN_GO_FILE ?= ./cmd/$(CMD)
 
 CACHE_CMD ?= k8s-cache
-CACHE_MAIN_GO_FILE ?= cmd/$(CACHE_CMD)/main.go
+CACHE_MAIN_GO_FILE ?= ./cmd/$(CACHE_CMD)
 
 GOOS ?= linux
 GOARCH ?= $(shell go env GOARCH || echo amd64)

@@ -519,6 +519,12 @@ tracked in
 
 The `capture.instrumentation` section defines protocol-specific instrumentation controls, including enablement and filtering for traces and metrics.
 
+`capture.instrumentation.record_payloads` opts into retaining captured request
+and response wire bytes on OBI protocol spans. It applies to protocols whose
+buffers OBI already captures (including HTTP, PostgreSQL, and MySQL); the
+captured bytes stay bounded by the protocol buffer limits. Treat this as
+payload-bearing telemetry when selecting an export destination.
+
 All protocols (HTTP, gRPC, SQL, Redis, Kafka, MongoDB, Couchbase, DNS, GPU,
 Aerospike) have a consistent base structure for trace and metric enablement.
 Each protocol can also have specific subsections; for example, SQL has `mysql`

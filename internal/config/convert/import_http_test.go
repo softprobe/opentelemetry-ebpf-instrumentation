@@ -319,6 +319,7 @@ func TestV2ToRuntimeHTTPPayloadExtractionRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	cfg := defaultRuntimeConfig()
+	cfg.EBPF.PayloadExtraction.RecordPayloads = true
 	http := &cfg.EBPF.PayloadExtraction.HTTP
 	http.GraphQL.Enabled = true
 	http.Elasticsearch.Enabled = true
@@ -360,6 +361,7 @@ func TestV2ToRuntimeHTTPPayloadExtractionRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	gotHTTP := got.EBPF.PayloadExtraction.HTTP
+	require.True(t, got.EBPF.PayloadExtraction.RecordPayloads)
 	require.True(t, gotHTTP.GraphQL.Enabled)
 	require.True(t, gotHTTP.Elasticsearch.Enabled)
 	require.True(t, gotHTTP.AWS.Enabled)

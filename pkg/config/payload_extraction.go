@@ -15,11 +15,12 @@ import (
 )
 
 type PayloadExtraction struct {
-	HTTP HTTPConfig `yaml:"http"`
+	HTTP           HTTPConfig `yaml:"http"`
+	RecordPayloads bool       `yaml:"record_payloads"`
 }
 
 func (p PayloadExtraction) Enabled() bool {
-	return p.HTTP.GraphQL.Enabled || p.HTTP.ClientEnabled()
+	return p.RecordPayloads || p.HTTP.GraphQL.Enabled || p.HTTP.ClientEnabled()
 }
 
 type HTTPConfig struct {
