@@ -36,6 +36,8 @@ public class SSLStorage {
       new CappedConcurrentHashMap<>(MAX_CONCURRENT);
   private static final CappedConcurrentHashMap<Integer, Long> jdkHttpClientEvents =
       new CappedConcurrentHashMap<>(MAX_CONCURRENT);
+  private static final CappedConcurrentHashMap<Integer, Long> apacheHttpAsyncProducers =
+      new CappedConcurrentHashMap<>(MAX_CONCURRENT);
 
   private static final String JDK_HTTP_CLIENT_SCHEDULABLE_TASK =
       "jdk.internal.net.http.common.SequentialScheduler$SchedulableTask";
@@ -309,5 +311,23 @@ public class SSLStorage {
     int taskId = System.identityHashCode(task);
     Long parentThreadId = tasks.get(taskId);
     return parentThreadId == null ? jdkHttpClientTasks.get(taskId) : parentThreadId;
+  }
+
+  public static void trackApacheHttpAsyncProducer(Object producer, long requestThreadId) {
+    if (producer != null) {
+      apacheHttpAsyncProducers.put(System.identityHashCode(producer), requestThreadId);
+    }
+  }
+
+  public static Long apacheHttpAsyncProducerThreadId(Object producer) {
+    return producer == null
+        ? null
+        : apacheHttpAsyncProducers.get(System.identityHashCode(producer));
+  }
+
+  public static void removeApacheHttpAsyncProducer(Object producer) {
+    if (producer != null) {
+      apacheHttpAsyncProducers.remove(System.identityHashCode(producer));
+    }
   }
 }

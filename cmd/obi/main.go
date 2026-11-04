@@ -92,6 +92,20 @@ func loadConfigReader(file io.Reader) (*obi.Config, string, error) {
 }
 
 func main() {
+	if handled, exitCode := runSoftprobeIngress(os.Args[1:]); handled {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return
+	}
+
+	if handled, exitCode := runSoftprobeGateway(os.Args[1:]); handled {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return
+	}
+
 	if handled, exitCode := configcmd.MaybeRun(os.Args[1:], os.Stdout, os.Stderr); handled {
 		if exitCode != configcmd.ExitSuccess {
 			os.Exit(exitCode)

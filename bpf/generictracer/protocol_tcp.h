@@ -14,6 +14,7 @@
 #include <common/preempt_guard.h>
 #include <common/protocol_defs.h>
 #include <common/ringbuf.h>
+#include <common/softprobe_request_context.h>
 #include <common/trace_helpers.h>
 #include <common/trace_lifecycle.h>
 #include <common/trace_parent.h>
@@ -70,6 +71,12 @@ static __always_inline void set_tcp_trace_info(u32 type,
     dbg_print_http_connection_info(conn);
 
     server_or_client_trace(type, conn, lw_thread, tp_p, ssl, orig_dport, 0, BPF_ANY);
+
+    if (type != TRACE_TYPE_CLIENT) {
+        return;
+    }
+
+    softprobe_store_request_context(conn, tp);
 }
 
 static __always_inline void tcp_get_or_set_trace_info(tcp_req_t *req,

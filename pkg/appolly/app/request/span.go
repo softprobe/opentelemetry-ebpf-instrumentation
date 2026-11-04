@@ -1584,6 +1584,11 @@ type Span struct {
 	RequestBodyContent string `json:"requestBodyContent,omitempty"`
 	// ResponseBodyContent stores the extracted HTTP response body (JSON string, possibly with obfuscated fields).
 	ResponseBodyContent string `json:"responseBodyContent,omitempty"`
+	// SoftprobeRequestPayload and SoftprobeResponsePayload retain captured wire bytes only when
+	// payload capture is enabled. The Softprobe OTLP adapter converts them to the existing recording
+	// shape; ordinary OBI spans do not export these fields.
+	SoftprobeRequestPayload  []byte `json:"-"`
+	SoftprobeResponsePayload []byte `json:"-"`
 
 	// OverrideTraceName is set under some conditions, like spanmetrics reaching the maximum
 	// cardinality for trace names.

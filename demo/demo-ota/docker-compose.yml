@@ -1,0 +1,101 @@
+services:
+  softprobe-gateway:
+    image: alpine:3.21
+    cap_add:
+      - BPF
+      - SYS_ADMIN
+    command:
+      - /usr/local/bin/obi
+      - softprobe-gateway
+      - --mode
+      - ${SOFTPROBE_GATEWAY_MODE:-record}
+      - --listen
+      - 0.0.0.0:15001
+      - --app-id
+      - travel-ota
+      - --upstream
+      - https://spair.softprobe.ai
+      - --trace-api
+      - http://sp-dev-app:8090/v1/traces
+      - --record-api
+      - http://sp-dev-app:8090/api/storage/record/query
+    volumes:
+      - ../../bin/obi:/usr/local/bin/obi:ro
+      - /sys/fs/bpf:/sys/fs/bpf:ro
+    networks:
+      - default
+      - sp-backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:15001/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  softprobe-ingress:
+    image: alpine:3.21
+    command:
+      - /usr/local/bin/obi
+      - softprobe-ingress
+      - --listen
+      - 0.0.0.0:15002
+      - --app-id
+      - travel-ota
+      - --upstream
+      - http://travel-ota:8080
+      - --trace-api
+      - http://sp-dev-app:8090/v1/traces
+      - --record-api
+      - http://sp-dev-app:8090/api/storage/record/query
+    ports:
+      - "18080:15002"
+    volumes:
+      - ../../bin/obi:/usr/local/bin/obi:ro
+    depends_on:
+      - travel-ota
+    networks:
+      - default
+      - sp-backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:15002/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  travel-ota:
+    image: eclipse-temurin:21-jre
+    command: ["java", "-jar", "/opt/app/travel-ota.jar"]
+    depends_on:
+      softprobe-gateway:
+        condition: service_healthy
+    environment:
+      AIRLINE_NDC_BASE_URL: "http://softprobe-gateway:15001/ndc/v21.3"
+      OTEL_SERVICE_NAME: "travel-ota"
+    volumes:
+      - ../../../demo-ota/travel-ota/target/travel-ota-1.0-SNAPSHOT.jar:/opt/app/travel-ota.jar:ro
+    networks:
+      - default
+      - sp-backend
+
+  obi:
+    image: alpine:3.21
+    command: ["/usr/local/bin/obi", "--config", "/etc/obi.yaml"]
+    privileged: true
+    pid: "service:travel-ota"
+    depends_on:
+      - travel-ota
+    volumes:
+      - ../../bin/obi:/usr/local/bin/obi:ro
+      - ./obi.yaml:/etc/obi.yaml:ro
+      - /sys/fs/bpf:/sys/fs/bpf
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /sys/kernel/debug:/sys/kernel/debug
+      - /sys/kernel/tracing:/sys/kernel/tracing
+    networks:
+      - default
+      - sp-backend
+
+networks:
+  default:
+  sp-backend:
+    external: true
+    name: sp-dev_sp-dev

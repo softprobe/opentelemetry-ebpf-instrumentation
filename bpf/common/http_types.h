@@ -65,7 +65,22 @@ typedef struct call_protocol_args {
 static __always_inline void read_request_buf(http_info_t *info, const call_protocol_args_t *args) {
     u32 info_buf_len = (u32)args->bytes_len;
     bpf_clamp_umax(info_buf_len, FULL_BUF_SIZE);
-    bpf_probe_read(info->buf, info_buf_len, (void *)args->u_buf);
+
+    // Keep the fixed-size event buffer limited to HTTP headers. Large body
+    // capture is controlled separately by http_max_captured_bytes; copying the
+    // whole first packet here would retain a body prefix even when that limit
+    // is zero.
+    const unsigned char *src = (const unsigned char *)args->u_buf;
+    for (u32 i = 0; i < info_buf_len; i++) {
+        if (bpf_probe_read(&info->buf[i], sizeof(info->buf[i]), src + i) != 0) {
+            break;
+        }
+
+        if (i >= 3 && info->buf[i - 3] == '\r' && info->buf[i - 2] == '\n' &&
+            info->buf[i - 1] == '\r' && info->buf[i] == '\n') {
+            break;
+        }
+    }
 }
 
 // Here we keep information on the packets passing through the socket filter

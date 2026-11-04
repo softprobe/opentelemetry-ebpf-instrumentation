@@ -18,9 +18,11 @@ static unsigned int test_last_read_size;
 static const char *test_src_base;
 static unsigned int test_src_len;
 static int test_read_faulted;
+static unsigned int test_total_read_size;
 
 static long test_probe_read(void *dst, unsigned int size, const void *src) {
     test_last_read_size = size;
+    test_total_read_size += size;
     const unsigned int off = (unsigned int)((const char *)src - test_src_base);
     if (off + size > test_src_len) {
         test_read_faulted = 1;
@@ -50,6 +52,7 @@ static call_protocol_args_t args_for(const char *payload, unsigned int readable,
     test_src_len = readable;
     test_read_faulted = 0;
     test_last_read_size = 0;
+    test_total_read_size = 0;
 
     call_protocol_args_t args = {0};
     args.bytes_len = bytes_len;
@@ -65,7 +68,7 @@ static void test_short_request_line_is_fully_copied(void) {
 
     read_request_buf(&info, &args);
 
-    assert_uint_eq(len, test_last_read_size, "read is clamped down to the payload length");
+    assert_uint_eq(len, test_total_read_size, "read is clamped down to the payload length");
     assert_true(!test_read_faulted, "clamped read stays within the payload and does not fault");
     assert_true(memcmp(info.buf, "GET ", 4) == 0, "method survives the copy");
 }
@@ -90,14 +93,33 @@ static void test_oversized_payload_is_clamped_to_capacity(void) {
 
     read_request_buf(&info, &args);
 
-    assert_uint_eq(FULL_BUF_SIZE, test_last_read_size, "read never exceeds info->buf capacity");
+    assert_uint_eq(FULL_BUF_SIZE, test_total_read_size, "read never exceeds info->buf capacity");
     assert_true(!test_read_faulted, "capacity-clamped read does not fault");
+}
+
+static void test_request_body_is_not_copied_after_headers(void) {
+    const char payload[] =
+        "POST /capture HTTP/1.1\r\nHost: example.com\r\nContent-Length: 16\r\n\r\nBODY_SENTINEL";
+    const unsigned int header_len = (unsigned int)(strstr(payload, "\r\n\r\n") - payload) + 4;
+    const unsigned int payload_len = (unsigned int)strlen(payload);
+    http_info_t info = {0};
+    call_protocol_args_t args = args_for(payload, payload_len, (int)payload_len);
+    args.packet_type = PACKET_TYPE_REQUEST;
+
+    read_request_buf(&info, &args);
+
+    assert_uint_eq(header_len, test_total_read_size, "copy stops at the end of HTTP headers");
+    assert_true(memcmp(info.buf, payload, header_len) == 0,
+                "HTTP request headers survive the copy");
+    assert_true(memchr(info.buf, 'B', sizeof(info.buf)) == NULL,
+                "request body sentinel is not retained");
 }
 
 int main(void) {
     test_short_request_line_is_fully_copied();
     test_unclamped_read_would_have_faulted();
     test_oversized_payload_is_clamped_to_capacity();
+    test_request_body_is_not_copied_after_headers();
 
     return 0;
 }

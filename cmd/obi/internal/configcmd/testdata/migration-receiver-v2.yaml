@@ -49,6 +49,7 @@ rules:
             exe_path_glob:
                 - /srv/cart-*
 instrumentation:
+    record_payloads: false
     http:
         enabled:
             traces: true

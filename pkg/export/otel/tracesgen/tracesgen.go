@@ -35,6 +35,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/export/otel/idgen"
 	"go.opentelemetry.io/obi/pkg/export/otel/otelcfg"
 	"go.opentelemetry.io/obi/pkg/metadata"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 )
 
 const userAgentHeader = "user-agent"
@@ -1778,6 +1779,7 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
 	if _, ok := optionalAttrs[attr.SkipSpanMetrics]; ok {
 		attrs = append(attrs, spanMetricsSkip)
 	}
+	attrs = append(attrs, softprobe.AttributesForSpan(span, span.Service.UID.Name)...)
 
 	return attrs
 }

@@ -12,16 +12,17 @@ import (
 
 // Instrumentation groups protocol-specific capture settings.
 type Instrumentation struct {
-	HTTP      HTTPInstrumentation       `yaml:"http"`
-	GRPC      ProtocolInstrumentation   `yaml:"grpc"`
-	SQL       SQLInstrumentation        `yaml:"sql"`
-	Redis     RedisInstrumentation      `yaml:"redis"`
-	Kafka     KafkaInstrumentation      `yaml:"kafka"`
-	Mongo     MongoInstrumentation      `yaml:"mongo"`
-	Couchbase CouchbaseInstrumentation  `yaml:"couchbase"`
-	DNS       DNSInstrumentation        `yaml:"dns"`
-	GPU       GPUInstrumentation        `yaml:"gpu"`
-	Aerospike *AerospikeInstrumentation `yaml:"aerospike,omitempty"`
+	RecordPayloads bool                      `yaml:"record_payloads"`
+	HTTP           HTTPInstrumentation       `yaml:"http"`
+	GRPC           ProtocolInstrumentation   `yaml:"grpc"`
+	SQL            SQLInstrumentation        `yaml:"sql"`
+	Redis          RedisInstrumentation      `yaml:"redis"`
+	Kafka          KafkaInstrumentation      `yaml:"kafka"`
+	Mongo          MongoInstrumentation      `yaml:"mongo"`
+	Couchbase      CouchbaseInstrumentation  `yaml:"couchbase"`
+	DNS            DNSInstrumentation        `yaml:"dns"`
+	GPU            GPUInstrumentation        `yaml:"gpu"`
+	Aerospike      *AerospikeInstrumentation `yaml:"aerospike,omitempty"`
 }
 
 // ProtocolInstrumentation describes common trace and metric enablement and

@@ -60,16 +60,25 @@ func ReadTCPRequestIntoSpan(parseCtx *EBPFParseContext, cfg *config.EBPFTracer, 
 	}
 
 	if span, ignore, matched, err := dispatchKernelAssignedProtocol(parseCtx, event, requestBuffer, responseBuffer); matched {
+		if !ignore && err == nil && cfg.PayloadExtraction.RecordPayloads {
+			captureTCPPayloads(&span, requestBuffer, responseBuffer)
+		}
 		span.ParentConditional = event.ParentStatus == parentStatusConditional
 		return span, ignore, err
 	}
 
 	if span, ignore, matched, err := detectGenericProtocol(parseCtx, cfg, event, requestBuffer, responseBuffer); matched {
+		if !ignore && err == nil && cfg.PayloadExtraction.RecordPayloads {
+			captureTCPPayloads(&span, requestBuffer, responseBuffer)
+		}
 		span.ParentConditional = event.ParentStatus == parentStatusConditional
 		return span, ignore, err
 	}
 
 	if span, ignore, matched, err := detectHeuristicProtocol(parseCtx, event, requestBuffer, responseBuffer); matched {
+		if !ignore && err == nil && cfg.PayloadExtraction.RecordPayloads {
+			captureTCPPayloads(&span, requestBuffer, responseBuffer)
+		}
 		span.ParentConditional = event.ParentStatus == parentStatusConditional
 		return span, ignore, err
 	}
@@ -80,6 +89,15 @@ func ReadTCPRequestIntoSpan(parseCtx *EBPFParseContext, cfg *config.EBPFTracer, 
 	}
 
 	return request.Span{}, true, nil // ignore if we couldn't parse it
+}
+
+func captureTCPPayloads(span *request.Span, requestBuffer, responseBuffer *largebuf.LargeBuffer) {
+	if requestBuffer != nil {
+		span.SoftprobeRequestPayload = append([]byte(nil), requestBuffer.UnsafeView()...)
+	}
+	if responseBuffer != nil {
+		span.SoftprobeResponsePayload = append([]byte(nil), responseBuffer.UnsafeView()...)
+	}
 }
 
 func emitTCPExtraSpans(parseCtx *EBPFParseContext, event *TCPRequestInfo, spans ...request.Span) {
