@@ -38,6 +38,16 @@ its traces directly to the backend's `POST /v1/traces` endpoint. The demo does
 not attach `sp-agent-java`. OBI's optional Java runtime helper is enabled so
 replay context propagates across the Java server and client spans.
 
+For application-session capture experiments, use
+[`obi-session-capture.yaml`](obi-session-capture.yaml). It emits HTTP metadata
+for the selected Java process and keeps HTTP, SQL, and generic payload buffers
+disabled. The current OBI route policies normalize or filter spans after the
+HTTP request has been observed; they do not provide an early method/path gate
+before body buffering. Keep these buffer sizes at zero until that gate is
+implemented and verified on each supported runtime. The regular `obi.yaml`
+continues to serve the existing record/replay demo, which has separate gateway
+payload recording and SQL replay behavior.
+
 Record a flight search and keep the trace ID and request body for replay:
 
 ```bash

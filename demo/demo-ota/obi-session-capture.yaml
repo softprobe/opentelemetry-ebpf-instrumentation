@@ -1,0 +1,34 @@
+file_format: "1.0"
+
+extensions:
+  obi:
+    version: "2.0"
+    capture:
+      policy:
+        default_action: exclude
+      rules:
+        - action: include
+          match:
+            process:
+              language_glob:
+                - "java"
+              cmd_args_glob:
+                - "*travel-ota*"
+      instrumentation:
+        record_payloads: false
+        http:
+          enabled:
+            traces: true
+            metrics: false
+          buffer_size: 0
+        sql:
+          postgres:
+            buffer_size: 0
+          mysql:
+            buffer_size: 0
+      runtimes:
+        java:
+          enabled: true
+      engine:
+        propagation:
+          context_propagation: headers
