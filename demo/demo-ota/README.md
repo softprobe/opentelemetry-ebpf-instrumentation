@@ -45,8 +45,9 @@ disabled. The current OBI route policies normalize or filter spans after the
 HTTP request has been observed; they do not provide an early method/path gate
 before body buffering. Keep these buffer sizes at zero until that gate is
 implemented and verified on each supported runtime. The regular `obi.yaml`
-continues to serve the existing record/replay demo, which has separate gateway
-payload recording and SQL replay behavior.
+captures HTTP traffic for the record/replay demo. The OTA app stores booking and
+payment records in its embedded H2 database; OBI does not observe those
+in-process database calls as PostgreSQL or MySQL wire traffic.
 
 Record a flight search and keep the trace ID and request body for replay:
 
@@ -77,21 +78,11 @@ restores the recorded trace ID from replay `tracestate`, forwards it to
 backend query API. OBI context propagation carries the replay trace to airline
 calls; the dependency gateway queries the recorded `HttpClient` response by
 trace ID and request key. When an HTTP client omits `traceparent`, the gateway
-uses OBI's per-request context handoff. With the `obi-replay` profile, the app
-also writes bookings to PostgreSQL, writes payments to MySQL, and queries orders
-from PostgreSQL. OBI records each SQL request and response; the gateway consumes
-the same per-request handoff, refreshed for each sequential statement on a pooled
-connection, and replays the captured database response. SQL bytes are unchanged,
-and replayed table queries do not execute against the backing database. Driver
-session setup and narrow server-metadata commands are forwarded so pooled
-connections can initialize; MySQL 8.4 query attributes are decoded before SQL
-matching. Data queries are answered from capture, and the allowlist does not
-forward application-table reads or global MySQL settings.
-Order queries still call the airline `orderretrieve` endpoint to
-preserve the existing `HttpClient` recording; the PostgreSQL row supplies the
-response when it exists, with the airline result as fallback. The demo uses
-PostgreSQL simple-query mode and MySQL `COM_QUERY`. Pipelined or multiplexed
-requests on one connection are not supported by the current handoff.
+uses OBI's per-request context handoff. Booking and payment records are stored in
+the app's embedded H2 database, initialized automatically with the app and
+adding no database service to the deployment. Its in-memory contents last for
+the lifetime of the app process. OBI captures the app and airline HTTP spans;
+embedded database calls are not part of the HTTP record/replay path.
 The replay path does not call Cloudflare. To record again, recreate the
 dependency gateway with the default mode:
 
@@ -101,20 +92,15 @@ docker compose -f demo/demo-ota/docker-compose.yml up -d --force-recreate softpr
 ```
 
 The dependency gateway needs `BPF` and `SYS_ADMIN` capabilities to consume
-OBI's pinned per-request context map during PostgreSQL and MySQL replay. The
-demo Compose service grants those capabilities and mounts `/sys/fs/bpf` read-only.
+OBI's pinned per-request context map when an HTTP client does not propagate
+`traceparent`. The demo Compose service grants those capabilities and mounts
+`/sys/fs/bpf` read-only.
 
 Stop the demo without removing persistent backend data:
 
 ```bash
 docker compose -f demo/demo-ota/docker-compose.yml down
 ```
-
-OBI's current MySQL SQL spans do not expose a database namespace, so MySQL
-record/replay matches by trace ID, protocol, SQL operation, and table. PostgreSQL
-records the database name parsed from startup. See [the record/replay design
-note](../../devdocs/softprobe-record-replay.md) for protocol limits and the
-per-request context handoff.
 
 Other supported OBI protocols still retain bounded raw request/response
 payloads, but do not yet have Softprobe replay adapters. The OBI sidecar requires

@@ -108,8 +108,7 @@ SP_BIN=../cli/sp \
 SP_API_URL=http://127.0.0.1:18090 \
 OTA_BASE_URL=http://127.0.0.1:18080 \
 SP_E2E_REPLAY_ENV=http://softprobe-ingress:15002 \
-SP_OBI_DATABASE_E2E=1 \
-./.venv/bin/python -m pytest -v test_ota_recording_e2e.py test_ota_database_recording_e2e.py
+./.venv/bin/python -m pytest -v test_ota_recording_e2e.py
 
 SOFTPROBE_GATEWAY_MODE=replay docker compose \
   -f ../sp-obi/demo/demo-ota/docker-compose.yml \
@@ -129,9 +128,8 @@ per run so an older backend record cannot shadow the fresh recording.
 Java-agent-only log export and execution-path
 deduplication remain outside this OBI API replay check.
 
-The same Docker demo also exercises Postgres order inserts/reads and MySQL
-payment inserts in the recording and replay flows. The order endpoint keeps its
-airline `orderretrieve` call so the existing `HttpClient` operation remains
-recorded; PostgreSQL supplies the response when the order row exists, with the
-airline response as fallback. Other parsed TCP protocols can retain bounded raw
-payloads but do not yet have Softprobe replay adapters.
+The travel-ota harness stores booking and payment state in an embedded H2
+database. Because H2 runs in-process, OBI does not see those calls as SQL wire
+traffic and the demo does not exercise the database replay adapter. Other
+parsed TCP protocols can retain bounded raw payloads but do not yet have
+Softprobe replay adapters.

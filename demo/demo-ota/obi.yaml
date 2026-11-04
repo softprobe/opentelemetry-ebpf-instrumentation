@@ -27,11 +27,6 @@ extensions:
           enabled:
             traces: true
             metrics: false
-        sql:
-          postgres:
-            buffer_size: 65536
-          mysql:
-            buffer_size: 65536
       runtimes:
         java:
           enabled: true

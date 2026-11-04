@@ -19,24 +19,9 @@ services:
       - http://sp-dev-app:8090/v1/traces
       - --record-api
       - http://sp-dev-app:8090/api/storage/record/query
-      - --postgres-listen
-      - 0.0.0.0:5432
-      - --postgres-upstream
-      - postgres:5432
-      - --postgres-database
-      - travel_orders
-      - --mysql-listen
-      - 0.0.0.0:3306
-      - --mysql-upstream
-      - mysql:3306
     volumes:
       - ../../bin/obi:/usr/local/bin/obi:ro
       - /sys/fs/bpf:/sys/fs/bpf:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      mysql:
-        condition: service_healthy
     networks:
       - default
       - sp-backend
@@ -85,48 +70,11 @@ services:
     environment:
       AIRLINE_NDC_BASE_URL: "http://softprobe-gateway:15001/ndc/v21.3"
       OTEL_SERVICE_NAME: "travel-ota"
-      SPRING_PROFILES_ACTIVE: "obi-replay"
     volumes:
       - ../../../demo-ota/travel-ota/target/travel-ota-1.0-SNAPSHOT.jar:/opt/app/travel-ota.jar:ro
     networks:
       - default
       - sp-backend
-
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: travel_orders
-      POSTGRES_USER: travel
-      POSTGRES_PASSWORD: softprobe
-      POSTGRES_HOST_AUTH_METHOD: trust
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./postgres/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U travel -d travel_orders"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-    networks:
-      - default
-
-  mysql:
-    image: mysql:8.4
-    environment:
-      MYSQL_DATABASE: travel_payments
-      MYSQL_ROOT_PASSWORD: softprobe
-      MYSQL_ROOT_HOST: "%"
-    volumes:
-      - mysql_data:/var/lib/mysql
-      - ./mysql/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
-      interval: 2s
-      timeout: 3s
-      retries: 45
-      start_period: 20s
-    networks:
-      - default
 
   obi:
     image: alpine:3.21
@@ -145,10 +93,6 @@ services:
     networks:
       - default
       - sp-backend
-
-volumes:
-  postgres_data:
-  mysql_data:
 
 networks:
   default:
