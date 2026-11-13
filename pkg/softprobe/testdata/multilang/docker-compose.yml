@@ -1,0 +1,227 @@
+name: sp-obi-multilang
+
+services:
+  multilang-mongodb:
+    image: mongo:7.0
+    container_name: multilang-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: myuser
+      MONGO_INITDB_ROOT_PASSWORD: 1024.chaO
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      multilang-net:
+        ipv4_address: 172.31.42.18
+
+  multilang-backend-redis:
+    image: redis:7-alpine
+    container_name: multilang-backend-redis
+    command: ["redis-server", "--requirepass", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      multilang-net:
+        ipv4_address: 172.31.42.19
+
+  multilang-backend:
+    image: sp-backend:local
+    container_name: multilang-backend
+    ports:
+      - "127.0.0.1:28090:8090"
+    environment:
+      JAVA_OPTS: "-Xms512m -Xmx2g"
+      SPRING_DATA_REDIS_HOST: "multilang-backend-redis"
+      SPRING_DATA_REDIS_PORT: "6379"
+      SPRING_DATA_REDIS_PASSWORD: ""
+      MONGODB_URI_STORAGE_DB: "mongodb://myuser:1024.chaO@multilang-mongodb:27017/sp_storage_db?authSource=admin"
+      OTEL_ENABLED: "false"
+      OTEL_TRACES_EXPORTER: "none"
+      OTEL_LOGS_EXPORTER: "none"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8090'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 45s
+    depends_on:
+      multilang-mongodb:
+        condition: service_healthy
+      multilang-backend-redis:
+        condition: service_healthy
+    networks:
+      multilang-net:
+        ipv4_address: 172.31.42.20
+
+  multilang-postgres:
+    image: postgres:17
+    container_name: multilang-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: traveldb
+    volumes:
+      - ./init/postgres.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d traveldb"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks:
+      multilang-net:
+        ipv4_address: 172.31.42.11
+
+  multilang-mysql:
+    image: mysql:8.0
+    container_name: multilang-mysql
+    command: ["--default-authentication-plugin=caching_sha2_password"]
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: otadb
+    volumes:
+      - ./init/mysql.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass"]
+      interval: 4s
+      timeout: 4s
+      retries: 30
+    networks:
+      multilang-net:
+        ipv4_address: 172.31.42.12
+
+  multilang-redis:
+    image: redis:7-alpine
+    container_name: multilang-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks:
+      multilang-net:
+        ipv4_address: 172.31.42.13
+
+  multilang-py:
+    build:
+      context: ./py-app
+    container_name: multilang-py
+    ports:
+      - "127.0.0.1:28081:8081"
+    extra_hosts:
+      - "multilang-postgres:172.31.42.11"
+      - "multilang-mysql:172.31.42.12"
+      - "multilang-redis:172.31.42.13"
+      - "multilang-backend:172.31.42.20"
+    depends_on:
+      multilang-backend:
+        condition: service_healthy
+      multilang-postgres:
+        condition: service_healthy
+      multilang-redis:
+        condition: service_healthy
+    networks:
+      multilang-net:
+        ipv4_address: 172.31.42.31
+
+  multilang-py-obi:
+    image: ${SP_OBI_IMAGE:-sp-obi:multilang-test}
+    container_name: multilang-py-obi
+    privileged: true
+    cgroup: host
+    pid: "service:multilang-py"
+    network_mode: "service:multilang-py"
+    command: ["--config=/etc/obi/config.yaml"]
+    volumes:
+      - ./obi/py-obi.yaml:/etc/obi/config.yaml:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - /sys/kernel/security:/sys/kernel/security:ro
+    depends_on:
+      - multilang-py
+
+  multilang-node:
+    build:
+      context: ./node-app
+    container_name: multilang-node
+    ports:
+      - "127.0.0.1:28082:8082"
+    extra_hosts:
+      - "multilang-postgres:172.31.42.11"
+      - "multilang-mysql:172.31.42.12"
+      - "multilang-redis:172.31.42.13"
+      - "multilang-backend:172.31.42.20"
+    depends_on:
+      multilang-backend:
+        condition: service_healthy
+      multilang-postgres:
+        condition: service_healthy
+      multilang-mysql:
+        condition: service_healthy
+    networks:
+      multilang-net:
+        ipv4_address: 172.31.42.32
+
+  multilang-node-obi:
+    image: ${SP_OBI_IMAGE:-sp-obi:multilang-test}
+    container_name: multilang-node-obi
+    privileged: true
+    cgroup: host
+    pid: "service:multilang-node"
+    network_mode: "service:multilang-node"
+    command: ["--config=/etc/obi/config.yaml"]
+    volumes:
+      - ./obi/node-obi.yaml:/etc/obi/config.yaml:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - /sys/kernel/security:/sys/kernel/security:ro
+    depends_on:
+      - multilang-node
+
+  multilang-go:
+    build:
+      context: ./go-app
+    container_name: multilang-go
+    ports:
+      - "127.0.0.1:28083:8083"
+    extra_hosts:
+      - "multilang-postgres:172.31.42.11"
+      - "multilang-mysql:172.31.42.12"
+      - "multilang-redis:172.31.42.13"
+      - "multilang-backend:172.31.42.20"
+    depends_on:
+      multilang-backend:
+        condition: service_healthy
+      multilang-postgres:
+        condition: service_healthy
+      multilang-mysql:
+        condition: service_healthy
+      multilang-redis:
+        condition: service_healthy
+    networks:
+      multilang-net:
+        ipv4_address: 172.31.42.33
+
+  multilang-go-obi:
+    image: ${SP_OBI_IMAGE:-sp-obi:multilang-test}
+    container_name: multilang-go-obi
+    privileged: true
+    cgroup: host
+    pid: "service:multilang-go"
+    network_mode: "service:multilang-go"
+    command: ["--config=/etc/obi/config.yaml"]
+    volumes:
+      - ./obi/go-obi.yaml:/etc/obi/config.yaml:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - /sys/kernel/security:/sys/kernel/security:ro
+    depends_on:
+      - multilang-go
+
+networks:
+  multilang-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.42.0/24

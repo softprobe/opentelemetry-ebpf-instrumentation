@@ -382,9 +382,12 @@ func parseHTTPStatusFromLine(line string) int {
 }
 
 type DatabaseColumn struct {
-	Name     string `json:"name"`
-	DataType string `json:"dataType,omitempty"`
-	TypeOID  uint32 `json:"typeOid,omitempty"`
+	Name         string `json:"name"`
+	DataType     string `json:"dataType,omitempty"`
+	TypeOID      uint32 `json:"typeOid,omitempty"`
+	MySQLType    uint8  `json:"mysqlType,omitempty"`
+	MySQLFlags   uint16 `json:"mysqlFlags,omitempty"`
+	MySQLCharset uint16 `json:"mysqlCharset,omitempty"`
 }
 
 type DatabaseResult struct {
