@@ -26,6 +26,10 @@
     "daemon": {
       "$ref": "#/$defs/Daemon",
       "description": "Configure OBI daemon process behavior (logging, profiling, shutdown, internal metrics).\nStandalone-mode only: not valid in Collector receiver deployments.\nIf omitted, daemon defaults are used.\n"
+    },
+    "softprobe": {
+      "$ref": "#/$defs/Softprobe",
+      "description": "Configure Softprobe record-and-replay runtime behavior.\nStandalone-mode only: not valid in Collector receiver deployments.\nIf omitted, Softprobe defaults are used.\n"
     }
   },
   "$defs": {
@@ -2612,6 +2616,69 @@
         "enabled": {
           "type": "boolean",
           "default": false
+        }
+      }
+    },
+    "Softprobe": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Softprobe record-and-replay controls.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Softprobe record-and-replay runtime."
+        },
+        "app_id": {
+          "type": "string",
+          "default": "",
+          "description": "Softprobe application identifier."
+        },
+        "backend_url": {
+          "type": "string",
+          "default": "",
+          "description": "Base HTTP or HTTPS URL of sp-backend."
+        },
+        "vector_logs_url": {
+          "type": "string",
+          "default": "",
+          "description": "Optional HTTP or HTTPS URL for log shipping."
+        },
+        "env": {
+          "type": "string",
+          "default": "",
+          "description": "Deployment environment tag attached to recorded cases."
+        },
+        "record_rate": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1,
+          "description": "Recording rate multiplier or limit."
+        },
+        "exclude_error_responses": {
+          "type": "boolean",
+          "default": true,
+          "description": "Skip recording HTTP 4xx and 5xx entry responses."
+        },
+        "ingress_proxy_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 0,
+          "description": "Loopback TCP port for the in-process Softprobe ingress listener. Set 0 for automatic selection."
+        },
+        "egress_proxy_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 0,
+          "description": "Loopback TCP port for the in-process Softprobe egress listener. Set 0 for automatic selection."
+        },
+        "max_body_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 262144,
+          "description": "Maximum captured body payload size in bytes."
         }
       }
     }

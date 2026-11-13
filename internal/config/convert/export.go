@@ -48,6 +48,7 @@ func RuntimeToV2(cfg *obi.Config) (*schema.Document, *schema.Extension) {
 		Enrich:      enrich(cfg),
 		Correlation: correlation(cfg),
 		Daemon:      daemon(cfg),
+		Softprobe:   softprobeExtension(cfg.Softprobe),
 	}
 
 	doc := &schema.Document{
