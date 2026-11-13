@@ -36,6 +36,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/export/otel/otelcfg"
 	"go.opentelemetry.io/obi/pkg/internal/sqlprune"
 	"go.opentelemetry.io/obi/pkg/metadata"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 )
 
 const userAgentHeader = "user-agent"
@@ -243,7 +244,7 @@ func GenerateTracesWithAttributes(
 	reporterName string,
 	extraResAttrs ...attribute.KeyValue,
 ) ptrace.Traces {
-	return generateTracesWithAttributes(cache, svc, envResourceAttrs, nodeMeta, spans, reporterName, nil, extraResAttrs...)
+	return generateTracesWithAttributes(cache, svc, envResourceAttrs, nodeMeta, spans, reporterName, nil, nil, extraResAttrs...)
 }
 
 func GenerateTracesWithSelectedResourceAttributes(
@@ -256,7 +257,21 @@ func GenerateTracesWithSelectedResourceAttributes(
 	attrSelector attributes.Selection,
 	extraResAttrs ...attribute.KeyValue,
 ) ptrace.Traces {
-	return generateTracesWithAttributes(cache, svc, envResourceAttrs, nodeMeta, spans, reporterName, attrSelector, extraResAttrs...)
+	return generateTracesWithAttributes(cache, svc, envResourceAttrs, nodeMeta, spans, reporterName, attrSelector, nil, extraResAttrs...)
+}
+
+func GenerateTracesWithSoftprobe(
+	cache *expirable2.LRU[svc.UID, []attribute.KeyValue],
+	svc *svc.Attrs,
+	envResourceAttrs []attribute.KeyValue,
+	nodeMeta *metadata.NodeMeta,
+	spans []TraceSpanAndAttributes,
+	reporterName string,
+	attrSelector attributes.Selection,
+	softprobeEnricher *softprobe.SpanEnricher,
+	extraResAttrs ...attribute.KeyValue,
+) ptrace.Traces {
+	return generateTracesWithAttributes(cache, svc, envResourceAttrs, nodeMeta, spans, reporterName, attrSelector, softprobeEnricher, extraResAttrs...)
 }
 
 func generateTracesWithAttributes(
@@ -267,6 +282,7 @@ func generateTracesWithAttributes(
 	spans []TraceSpanAndAttributes,
 	reporterName string,
 	attrSelector attributes.Selection,
+	softprobeEnricher *softprobe.SpanEnricher,
 	extraResAttrs ...attribute.KeyValue,
 ) ptrace.Traces {
 	traces := ptrace.NewTraces()
@@ -278,7 +294,18 @@ func generateTracesWithAttributes(
 	resourceAttrsMap := AttrsToMap(resourceAttrs)
 	extraResAttrs = otelcfg.FilterResourceAttrs(extraResAttrs, attrSelector)
 	addAttrsToMap(extraResAttrs, resourceAttrsMap)
+	if softprobeEnricher != nil && softprobeEnricher.AppID() != "" {
+		resourceAttrsMap.PutStr(string(semconv.ServiceNameKey), softprobeEnricher.AppID())
+	}
 	resourceAttrsMap.MoveTo(rs.Resource().Attributes())
+
+	if softprobeEnricher != nil {
+		for _, item := range spans {
+			if item.Span != nil && item.Span.TraceID.IsValid() && item.Span.SpanID.IsValid() {
+				softprobeEnricher.ObserveServerSpan(item.Span, [16]byte(item.Span.TraceID), [8]byte(item.Span.SpanID))
+			}
+		}
+	}
 
 	for _, spanWithAttributes := range spans {
 		span := spanWithAttributes.Span
@@ -308,10 +335,19 @@ func generateTracesWithAttributes(
 		}
 		flags := exportedFlags(span, spanWithAttributes.RecordOnly)
 
+		preserveParentSpanID := softprobeEnricher != nil
+		if preserveParentSpanID && span.SpanID.IsValid() {
+			spanID = pcommon.SpanID(span.SpanID)
+		}
 		if hasSubSpans {
-			createSubSpans(span, spanID, traceID, flags, &ss, t)
+			createSubSpans(span, spanID, traceID, flags, &ss, t, preserveParentSpanID)
 		} else if span.SpanID.IsValid() {
 			spanID = pcommon.SpanID(span.SpanID)
+		}
+
+		var spRes softprobe.EnrichResult
+		if softprobeEnricher != nil {
+			spRes = softprobeEnricher.EnrichSpan(span, [16]byte(traceID), [8]byte(spanID), start.UnixNano(), t.End.UnixNano())
 		}
 
 		// Create a parent span for the whole request session
@@ -324,7 +360,7 @@ func generateTracesWithAttributes(
 		s.SetSpanID(spanID)
 		s.SetTraceID(traceID)
 		s.SetFlags(flags)
-		if span.ParentSpanID.IsValid() {
+		if span.ParentSpanID.IsValid() && !spRes.IsEntryPoint {
 			s.SetParentSpanID(pcommon.SpanID(span.ParentSpanID))
 		}
 
@@ -344,6 +380,7 @@ func generateTracesWithAttributes(
 		}
 		m.Remove(string(genAIResponseErrorControlKey))
 		m.MoveTo(s.Attributes())
+		applySoftprobeSpanAttributes(s.Attributes(), spRes.Attributes)
 
 		// Set status code
 		statusCode := CodeToStatusCode(request.SpanStatusCode(span))
@@ -423,7 +460,7 @@ func exportedFlags(span *request.Span, recordOnly bool) uint32 {
 }
 
 // createSubSpans creates the internal spans for a request.Span
-func createSubSpans(span *request.Span, parentSpanID pcommon.SpanID, traceID pcommon.TraceID, flags uint32, ss *ptrace.ScopeSpans, t request.Timings) {
+func createSubSpans(span *request.Span, parentSpanID pcommon.SpanID, traceID pcommon.TraceID, flags uint32, ss *ptrace.ScopeSpans, t request.Timings, preserveParentSpanID bool) {
 	// Create a child span showing the queue time
 	spQ := ss.Spans().AppendEmpty()
 	spQ.SetName("in queue")
@@ -444,7 +481,7 @@ func createSubSpans(span *request.Span, parentSpanID pcommon.SpanID, traceID pco
 	spP.SetKind(ptrace.SpanKindInternal)
 	spP.SetEndTimestamp(pcommon.NewTimestampFromTime(t.End))
 	spP.SetTraceID(traceID)
-	if span.SpanID.IsValid() {
+	if !preserveParentSpanID && span.SpanID.IsValid() {
 		spP.SetSpanID(pcommon.SpanID(span.SpanID))
 	} else {
 		spP.SetSpanID(pcommon.SpanID(idgen.RandomSpanID()))
@@ -452,6 +489,23 @@ func createSubSpans(span *request.Span, parentSpanID pcommon.SpanID, traceID pco
 	spP.SetParentSpanID(parentSpanID)
 	spP.SetFlags(flags)
 	appendSpanLinks(spP, span.Links)
+}
+
+func applySoftprobeSpanAttributes(dst pcommon.Map, attrs map[string]any) {
+	for k, v := range attrs {
+		switch tv := v.(type) {
+		case string:
+			dst.PutStr(k, tv)
+		case int:
+			dst.PutInt(k, int64(tv))
+		case int64:
+			dst.PutInt(k, tv)
+		case bool:
+			dst.PutBool(k, tv)
+		case float64:
+			dst.PutDouble(k, tv)
+		}
+	}
 }
 
 func appendSpanLinks(dst ptrace.Span, links []request.SpanLink) {

@@ -484,16 +484,25 @@ func ReadGoRedisRequestIntoSpan(parseCtx *EBPFParseContext, record *ringbuf.Reco
 		return request.Span{}, true, err
 	}
 
-	cmds := parseRedisCommands(event.Buf[:min(int(event.BufLen), len(event.Buf))])
+	rawReq := event.Buf[:min(int(event.BufLen), len(event.Buf))]
+	cmds := parseRedisCommands(rawReq)
 	if len(cmds) == 0 {
 		// We know it's redis request here, it just didn't complete correctly
 		event.Err = 1
-		return goRedisSpan(event, "", ""), false, nil
+		span := goRedisSpan(event, "", "")
+		if parseCtx.softprobeEnabled() {
+			captureSoftprobeGoRedis(parseCtx.softprobeMaxBodyBytes, &span, rawReq)
+		}
+		return span, false, nil
 	}
 
 	spans := make([]request.Span, 0, len(cmds))
 	for i := range cmds {
-		spans = append(spans, goRedisSpan(event, cmds[i].op, cmds[i].text))
+		s := goRedisSpan(event, cmds[i].op, cmds[i].text)
+		if parseCtx.softprobeEnabled() {
+			captureSoftprobeGoRedis(parseCtx.softprobeMaxBodyBytes, &s, rawReq)
+		}
+		spans = append(spans, s)
 	}
 	if len(spans) > 1 {
 		detachExtraSpans(spans[1:])

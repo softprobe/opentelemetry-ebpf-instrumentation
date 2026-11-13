@@ -59,18 +59,29 @@ func ReadTCPRequestIntoSpan(parseCtx *EBPFParseContext, cfg *config.EBPFTracer, 
 		fmt.Printf("[<] %v\n", responseBuffer.UnsafeView())
 	}
 
+	origDirection := event.Direction
+
 	if span, ignore, matched, err := dispatchKernelAssignedProtocol(parseCtx, event, requestBuffer, responseBuffer); matched {
 		span.ParentConditional = event.ParentStatus == parentStatusConditional
+		if !ignore && err == nil && parseCtx.softprobeEnabled() {
+			captureSoftprobeTCP(parseCtx.softprobeMaxBodyBytes, &span, requestBuffer, responseBuffer, event.Direction != origDirection)
+		}
 		return span, ignore, err
 	}
 
 	if span, ignore, matched, err := detectGenericProtocol(parseCtx, cfg, event, requestBuffer, responseBuffer); matched {
 		span.ParentConditional = event.ParentStatus == parentStatusConditional
+		if !ignore && err == nil && parseCtx.softprobeEnabled() {
+			captureSoftprobeTCP(parseCtx.softprobeMaxBodyBytes, &span, requestBuffer, responseBuffer, event.Direction != origDirection)
+		}
 		return span, ignore, err
 	}
 
 	if span, ignore, matched, err := detectHeuristicProtocol(parseCtx, event, requestBuffer, responseBuffer); matched {
 		span.ParentConditional = event.ParentStatus == parentStatusConditional
+		if !ignore && err == nil && parseCtx.softprobeEnabled() {
+			captureSoftprobeTCP(parseCtx.softprobeMaxBodyBytes, &span, requestBuffer, responseBuffer, event.Direction != origDirection)
+		}
 		return span, ignore, err
 	}
 
@@ -472,6 +483,11 @@ func matchRedis(parseCtx *EBPFParseContext, event *TCPRequestInfo, requestBuffer
 
 	if len(spans) > 1 {
 		detachExtraSpans(spans[1:])
+		if parseCtx.softprobeEnabled() {
+			for i := 1; i < len(spans); i++ {
+				captureSoftprobeTCP(parseCtx.softprobeMaxBodyBytes, &spans[i], requestBuffer, responseBuffer, reversed)
+			}
+		}
 		emitTCPExtraSpans(parseCtx, event, spans[1:]...)
 	}
 

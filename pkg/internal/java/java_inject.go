@@ -461,6 +461,9 @@ func (i *JavaInjector) attachOpts(runtimeMetricsEnabled bool) string {
 		opts = append(opts, fmt.Sprintf("runtimeMetricsIntervalNanos=%d",
 			i.cfg.JVMRuntimeMetrics.SamplingInterval.Nanoseconds()))
 	}
+	if i.cfg.Softprobe.Enabled {
+		opts = append(opts, "preferHttp1Alpn=true")
+	}
 
 	if len(opts) == 0 {
 		return ""
