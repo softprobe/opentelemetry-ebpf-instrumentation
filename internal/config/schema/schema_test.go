@@ -951,3 +951,36 @@ extensions:
 		require.Contains(t, err.Error(), "receiver top level")
 	}
 }
+
+func TestSoftprobeStandaloneAndReceiverBoundaries(t *testing.T) {
+	t.Parallel()
+
+	_, ext, err := ParseStandaloneYAML([]byte(`
+file_format: "1.0"
+extensions:
+  obi:
+    version: "2.0"
+    softprobe:
+      enabled: true
+      app_id: travel-ota
+      backend_url: http://127.0.0.1:18090
+      exclude_error_responses: false
+      max_body_bytes: 131072
+`))
+	require.NoError(t, err)
+	require.NotNil(t, ext.Softprobe)
+	require.True(t, ext.Softprobe.Enabled)
+	require.Equal(t, "travel-ota", ext.Softprobe.AppID)
+	require.NotNil(t, ext.Softprobe.ExcludeErrorResponses)
+	require.False(t, *ext.Softprobe.ExcludeErrorResponses)
+	require.Equal(t, 131072, ext.Softprobe.MaxBodyBytes)
+
+	_, err = ParseReceiverYAML([]byte(`
+version: "2.0"
+softprobe:
+  enabled: true
+`))
+	var disallowed *SectionNotAllowedError
+	require.ErrorAs(t, err, &disallowed)
+	require.Equal(t, "softprobe", disallowed.Section)
+}

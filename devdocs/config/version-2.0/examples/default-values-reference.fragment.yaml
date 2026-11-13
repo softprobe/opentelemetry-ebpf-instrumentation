@@ -737,3 +737,17 @@ extensions:
             span_metrics_service_cache_size: 10000
             extra_resource_attributes: []
             extra_span_resource_attributes: []
+
+    # softprobe configures in-process Softprobe record-and-replay behavior.
+    # Standalone-mode only: not valid in Collector receiver deployments.
+    softprobe:
+      enabled: false
+      app_id: ""
+      backend_url: ""
+      vector_logs_url: ""
+      env: ""
+      record_rate: 1
+      exclude_error_responses: true
+      ingress_proxy_port: 0
+      egress_proxy_port: 0
+      max_body_bytes: 262144

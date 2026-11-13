@@ -398,6 +398,7 @@ discovery:
 			CacheTTL: 5 * time.Minute,
 		},
 		PeerMetadata: DefaultConfig.PeerMetadata,
+		Softprobe:    DefaultConfig.Softprobe,
 		CloudMetadata: transform.CloudMetadataConfig{
 			DetectionEnabled: true,
 			Route53:          transform.Route53MetadataConfig{RefreshInterval: 5 * time.Minute},

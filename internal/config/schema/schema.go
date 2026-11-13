@@ -46,6 +46,7 @@ const (
 	sectionEnrich      = "enrich"
 	sectionCorrelation = "correlation"
 	sectionDaemon      = "daemon"
+	sectionSoftprobe   = "softprobe"
 )
 
 // Document is the top-level OpenTelemetry declarative configuration document
@@ -290,16 +291,17 @@ type Extensions struct {
 
 // Extension is the OBI v2 extension configuration.
 //
-// Capture is valid in all deployment modes. Enrich, Correlation, and Daemon are
-// standalone-only sections and are rejected when parsing receiver-embedded
-// configuration. ParseReceiverYAML synthesizes this shape from top-level receiver
-// capture sections.
+// Capture is valid in all deployment modes. Enrich, Correlation, Daemon, and
+// Softprobe are standalone-only sections and are rejected when parsing
+// receiver-embedded configuration. ParseReceiverYAML synthesizes this shape
+// from top-level receiver capture sections.
 type Extension struct {
 	Version     string       `yaml:"version"`
 	Capture     Capture      `yaml:"capture"`
 	Enrich      *Enrich      `yaml:"enrich,omitempty"`
 	Correlation *Correlation `yaml:"correlation,omitempty"`
 	Daemon      *Daemon      `yaml:"daemon,omitempty"`
+	Softprobe   *Softprobe   `yaml:"softprobe,omitempty"`
 
 	source *yaml.Node
 }
@@ -504,6 +506,9 @@ func ValidateReceiver(cfg *Extension) error {
 	if cfg.Daemon != nil {
 		return &SectionNotAllowedError{Section: sectionDaemon}
 	}
+	if cfg.Softprobe != nil {
+		return &SectionNotAllowedError{Section: sectionSoftprobe}
+	}
 	return nil
 }
 
@@ -533,6 +538,9 @@ func disallowedReceiverSection(root *yaml.Node) (string, bool) {
 	}
 	if _, ok := mappingValue(root, sectionDaemon); ok {
 		return sectionDaemon, true
+	}
+	if _, ok := mappingValue(root, sectionSoftprobe); ok {
+		return sectionSoftprobe, true
 	}
 	return "", false
 }
