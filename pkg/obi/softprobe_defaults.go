@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/appolly/services"
 	"go.opentelemetry.io/obi/pkg/config"
 	"go.opentelemetry.io/obi/pkg/export/otel/otelcfg"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 )
 
 const (
@@ -25,6 +26,20 @@ func (c *Config) ApplySoftprobeRuntimeDefaults() {
 	}
 
 	c.Softprobe = c.Softprobe.WithDefaults()
+	if c.Softprobe.IngressProxyPort == 0 {
+		if c.Softprobe.EgressProxyPort == softprobe.DefaultIngressProxyPort {
+			c.Softprobe.IngressProxyPort = softprobe.DefaultEgressProxyPort
+		} else {
+			c.Softprobe.IngressProxyPort = softprobe.DefaultIngressProxyPort
+		}
+	}
+	if c.Softprobe.EgressProxyPort == 0 {
+		if c.Softprobe.IngressProxyPort == softprobe.DefaultEgressProxyPort {
+			c.Softprobe.EgressProxyPort = softprobe.DefaultIngressProxyPort
+		} else {
+			c.Softprobe.EgressProxyPort = softprobe.DefaultEgressProxyPort
+		}
+	}
 
 	if c.ServiceName == "" && c.Softprobe.AppID != "" {
 		c.ServiceName = c.Softprobe.AppID

@@ -15,6 +15,7 @@ import io.opentelemetry.obi.java.instrumentations.data.Connection;
 import io.opentelemetry.obi.java.instrumentations.data.JdkHttpClientPropagation;
 import io.opentelemetry.obi.java.instrumentations.data.JdkHttpClientTask;
 import io.opentelemetry.obi.java.instrumentations.data.SSLStorage;
+import io.opentelemetry.obi.java.instrumentations.data.SoftprobeTrustBridge;
 import io.opentelemetry.obi.java.instrumentations.util.ByteBufferExtractor;
 import io.opentelemetry.obi.java.instrumentations.util.CappedConcurrentHashMap;
 import io.opentelemetry.obi.java.instrumentations.util.NettyChannelExtractor;
@@ -90,7 +91,7 @@ public class Agent {
     if (agentArgs != null && !agentArgs.isEmpty()) {
       String[] options = agentArgs.split(",");
       for (String option : options) {
-        String[] keyValue = option.split("=");
+        String[] keyValue = option.split("=", 2);
         if (keyValue.length == 2) {
           opts.put(keyValue[0], keyValue[1]);
         }
@@ -149,6 +150,10 @@ public class Agent {
       if (optEnabled(opts, "preferHttp1Alpn")) {
         setupPreferHttp1Alpn();
       }
+      String softprobeCaPath = opts.getOrDefault("softprobeCaPath", "");
+      if (!softprobeCaPath.isEmpty()) {
+        setupSoftprobeCaTrust(softprobeCaPath);
+      }
     } catch (Exception x) {
       System.err.println("Failed to load agent");
       x.printStackTrace(System.err);
@@ -192,6 +197,10 @@ public class Agent {
           agentBuilder
               .type(SSLAlpnPreferenceInst.type())
               .transform(SSLAlpnPreferenceInst.transformer());
+    }
+    if (!opts.getOrDefault("softprobeCaPath", "").isEmpty()) {
+      agentBuilder =
+          agentBuilder.type(TrustManagerInst.type()).transform(TrustManagerInst.transformer());
     }
     agentBuilder.installOn(inst);
 
@@ -240,6 +249,7 @@ public class Agent {
           || ApacheHttpAsyncClientInst.matches(clazz)
           || ReactorNettyHttpClientInst.matches(clazz)
           || SSLAlpnPreferenceInst.matches(clazz)
+          || TrustManagerInst.matches(clazz)
           || VirtualThreadInst.matches(clazz)) {
         if (Agent.debugOn) {
           System.err.println("Retransforming " + clazz);
@@ -275,6 +285,7 @@ public class Agent {
     Class.forName(JdkHttpClientPropagation.class.getName());
     Class.forName(NettyChannelExtractor.class.getName());
     Class.forName(SSLStorage.class.getName());
+    Class.forName(SoftprobeTrustBridge.class.getName());
     Class.forName(ByteBufferExtractor.class.getName());
     Class.forName(NativeMemory.class.getName());
     Class.forName(NativeLib.class.getName());
@@ -444,6 +455,18 @@ public class Agent {
       if (Agent.debugOn) {
         System.err.println("Failed to setup HTTP/1.1 ALPN preference: " + x);
       }
+    }
+  }
+
+  private static void setupSoftprobeCaTrust(String caPath) {
+    try {
+      SoftprobeTrustBridge.installCaFile(caPath);
+      Class<?> bootstrapBridge =
+          Class.forName(
+              "io.opentelemetry.obi.java.instrumentations.data.SoftprobeTrustBridge", true, null);
+      bootstrapBridge.getMethod("installCaFile", String.class).invoke(null, caPath);
+    } catch (Exception x) {
+      System.err.println("Failed to setup Softprobe CA trust: " + x);
     }
   }
 }

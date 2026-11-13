@@ -91,7 +91,7 @@ func New(cfg *obi.Config, metrics imetrics.Reporter, pidsFilter ebpfcommon.Servi
 		liveKeys:      make(map[uint64]int),
 		appPorts:      make(map[uint16]uint16),
 		excludedPorts: make(map[uint16]struct{}),
-		writeTracker:  softprobe.NewWriteContextTracker(0, 0),
+		writeTracker:  softprobe.SharedDataplaneBridge().WriteTracker(),
 	}
 
 	for _, p := range loopbackExcludedPortsFromConfig(cfg.Softprobe) {
@@ -142,6 +142,18 @@ func (p *Tracer) LookupOrigDst(remoteAddr net.Addr) (uint64, OrigDst, bool) {
 		return 0, OrigDst{}, false
 	}
 	return cookie, orig, true
+}
+
+func (p *Tracer) LookupEgressTarget(remoteAddr net.Addr) (softprobe.EgressTarget, bool) {
+	cookie, orig, ok := p.LookupOrigDst(remoteAddr)
+	if !ok {
+		return softprobe.EgressTarget{}, false
+	}
+	return softprobe.EgressTarget{
+		SockCookie: cookie,
+		AddrPort:   orig.AddrPort,
+		PID:        orig.PID,
+	}, true
 }
 
 func (p *Tracer) LookupOrigDstByCookie(sockCookie uint64) (OrigDst, bool) {
@@ -602,6 +614,7 @@ func (p *Tracer) Close() error {
 	p.closerMu.Unlock()
 
 	activeTracer.CompareAndSwap(p, nil)
+	softprobe.SharedDataplaneBridge().DetachDataplane(p)
 	closeReverse(closers)
 	return nil
 }
@@ -625,6 +638,10 @@ func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {
 		"tcp_sendmsg": {
 			Start:    p.bpfObjects.SpKprobeTcpSendmsg,
 			Required: true,
+		},
+		"tcp_bpf_sendmsg": {
+			Start:    p.bpfObjects.SpKprobeTcpSendmsg,
+			Required: false,
 		},
 	}
 }
@@ -659,6 +676,10 @@ func (p *Tracer) Run(ctx context.Context, _ *ebpfcommon.EBPFEventContext, _ *msg
 	if err := p.AttachCgroup(p.cfg.EBPF.CgroupFSPath); err != nil {
 		p.log.Error("failed attaching softprobe cgroup programs", "error", err)
 		return
+	}
+
+	if err := softprobe.SharedDataplaneBridge().AttachDataplane(p); err != nil {
+		p.log.Warn("failed registering softprobe ingress listener in sockmap", "error", err)
 	}
 
 	if p.cfg.Softprobe.IngressProxyPort > 0 {
@@ -716,6 +737,15 @@ func (p *Tracer) recordWriteEvent(raw []byte) {
 		ServerSpanID: ev.SpanId,
 		RecordedAt:   time.Now(),
 	})
+	p.log.Debug("recorded socket write context",
+		"sock_cookie", ev.SockCookie,
+		"byte_offset", ev.ByteOffset,
+		"payload_len", ev.PayloadLen,
+		"pid", ev.Pid,
+		"tid", ev.Tid,
+		"trace_id", softprobe.FormatTraceIDHex(ev.TraceId),
+		"span_id", softprobe.FormatSpanIDHex(ev.SpanId),
+	)
 }
 
 func pidKey(nsid, pid uint32) uint64 {

@@ -28,10 +28,12 @@ import (
 	"go.opentelemetry.io/obi/pkg/internal/jvmtools/jvm"
 	"go.opentelemetry.io/obi/pkg/internal/procs"
 	"go.opentelemetry.io/obi/pkg/obi"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 )
 
 const (
 	ObiJavaAgentFileName      = "obi-java-agent.jar"
+	SoftprobeCAFileName       = "sp-obi-ca.pem"
 	javaAgentEmbedPlaceholder = "OBI_JAVA_AGENT_PLACEHOLDER"
 )
 
@@ -220,7 +222,6 @@ func (i *JavaInjector) NewExecutable(ctx context.Context, target InjectionTarget
 		return err
 	}
 
-	agentOpts := i.attachOpts(target.RuntimeMetricsEnabled)
 	attachID := i.nextAttachID()
 
 	ctx, cancel := context.WithTimeout(ctx, i.cfg.Java.Timeout)
@@ -311,7 +312,7 @@ func (i *JavaInjector) NewExecutable(ctx context.Context, target InjectionTarget
 			return
 		}
 		rootPath := fmt.Sprintf("/proc/self/fd/%d", root.Fd())
-		agentPath, err := i.copyAgent(rootPath, target.Pid, target.TempDirEnv)
+		agentPath, softprobeCAPath, err := i.copyAgentBundle(rootPath, target.Pid, target.TempDirEnv)
 		rootCloseErr := root.Close()
 		if err != nil {
 			i.log.Error("failed to extract java agent", "pid", target.Pid, "error", err)
@@ -323,6 +324,7 @@ func (i *JavaInjector) NewExecutable(ctx context.Context, target InjectionTarget
 			return
 		}
 
+		agentOpts := i.attachOptsWithCA(target.RuntimeMetricsEnabled, softprobeCAPath)
 		if err = i.attachJDKAgent(ctx, attacher, target.Process, target.Pid, agentPath, agentOpts); err != nil {
 			i.log.Error("couldn't attach OpenTelemetry eBPF Java Agent", "pid", target.Pid, "path", agentPath, "error", err)
 			resultChan <- result{err: err}
@@ -377,24 +379,46 @@ func ensureEmbeddedAgent() error {
 }
 
 func (i *JavaInjector) copyAgent(root string, pid app.PID, tempDirEnv string) (string, error) {
+	agentPath, _, err := i.copyAgentBundle(root, pid, tempDirEnv)
+	return agentPath, err
+}
+
+func (i *JavaInjector) copyAgentBundle(root string, pid app.PID, tempDirEnv string) (string, string, error) {
 	tempDir, err := i.findTempDir(root, tempDirEnv)
 	if err != nil {
-		return "", fmt.Errorf("error accessing temp directory: %w", err)
+		return "", "", fmt.Errorf("error accessing temp directory: %w", err)
 	}
 
 	fullTempDir, ok := tempDirPath(root, tempDir)
 	if !ok {
-		return "", fmt.Errorf("invalid temp directory for injection: %q", tempDir)
+		return "", "", fmt.Errorf("invalid temp directory for injection: %q", tempDir)
 	}
 
 	i.log.Info("found injection directory for process", "pid", pid, "path", fullTempDir)
 
-	agentPathHost := filepath.Join(fullTempDir, ObiJavaAgentFileName)
+	if err := writeAtomicFile(fullTempDir, ObiJavaAgentFileName, embeddedJavaAgentBytes); err != nil {
+		return "", "", fmt.Errorf("writing target OBI java agent: %w", err)
+	}
 
-	source := bytes.NewReader(embeddedJavaAgentBytes)
-	target, err := os.CreateTemp(fullTempDir, ObiJavaAgentFileName+".tmp-*")
+	var caPathContainer string
+	if i.cfg != nil && i.cfg.Softprobe.Enabled {
+		if caPEM := softprobe.ActiveCAPEM(); len(caPEM) > 0 {
+			if err := writeAtomicFile(fullTempDir, SoftprobeCAFileName, caPEM); err != nil {
+				return "", "", fmt.Errorf("writing target Softprobe CA certificate: %w", err)
+			}
+			caPathContainer = filepath.Join(tempDir, SoftprobeCAFileName)
+		}
+	}
+
+	agentPathContainer := filepath.Join(tempDir, ObiJavaAgentFileName)
+	return agentPathContainer, caPathContainer, nil
+}
+
+func writeAtomicFile(dir, fileName string, content []byte) error {
+	destPath := filepath.Join(dir, fileName)
+	target, err := os.CreateTemp(dir, fileName+".tmp-*")
 	if err != nil {
-		return "", fmt.Errorf("unable to create target OBI java agent: %w", err)
+		return err
 	}
 	tmpTargetPath := target.Name()
 	cleanup := true
@@ -404,26 +428,22 @@ func (i *JavaInjector) copyAgent(root string, pid app.PID, tempDirEnv string) (s
 		}
 	}()
 
-	if _, err = target.ReadFrom(source); err != nil {
-		return "", fmt.Errorf("error writing java agent to target location: %w", err)
+	if _, err = target.ReadFrom(bytes.NewReader(content)); err != nil {
+		_ = target.Close()
+		return err
 	}
-
 	if err = target.Chmod(0o644); err != nil {
-		return "", fmt.Errorf("error setting permissions on target OBI java agent: %w", err)
+		_ = target.Close()
+		return err
 	}
-
 	if err = target.Close(); err != nil {
-		return "", fmt.Errorf("error closing target OBI java agent: %w", err)
+		return err
 	}
-
-	if err = os.Rename(tmpTargetPath, agentPathHost); err != nil {
-		return "", fmt.Errorf("unable to move target OBI java agent into place: %w", err)
+	if err = os.Rename(tmpTargetPath, destPath); err != nil {
+		return err
 	}
 	cleanup = false
-
-	agentPathContainer := filepath.Join(tempDir, ObiJavaAgentFileName)
-
-	return agentPathContainer, nil
+	return nil
 }
 
 func returnCodeLine(line string) (bool, error) {
@@ -439,6 +459,10 @@ func returnCodeLine(line string) (bool, error) {
 var supportsHeaderPropagation = ebpfcommon.SupportsJavaHTTP1Propagation
 
 func (i *JavaInjector) attachOpts(runtimeMetricsEnabled bool) string {
+	return i.attachOptsWithCA(runtimeMetricsEnabled, "")
+}
+
+func (i *JavaInjector) attachOptsWithCA(runtimeMetricsEnabled bool, softprobeCAPath string) string {
 	var opts []string
 	if i.cfg.Java.Debug {
 		opts = append(opts, "debug=true")
@@ -463,6 +487,9 @@ func (i *JavaInjector) attachOpts(runtimeMetricsEnabled bool) string {
 	}
 	if i.cfg.Softprobe.Enabled {
 		opts = append(opts, "preferHttp1Alpn=true")
+		if softprobeCAPath != "" {
+			opts = append(opts, "softprobeCaPath="+softprobeCAPath)
+		}
 	}
 
 	if len(opts) == 0 {

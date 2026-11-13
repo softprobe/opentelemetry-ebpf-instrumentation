@@ -42,6 +42,7 @@ type EnrichResult struct {
 type SpanEnricher struct {
 	cfg            Config
 	replayRegistry *ReplayRegistry
+	exchangeCache  *HTTPExchangeCache
 	mu             sync.Mutex
 	segments       *expirable.LRU[[16]byte, segmentEntry]
 }
@@ -50,8 +51,16 @@ func NewSpanEnricher(cfg Config, replayRegistry *ReplayRegistry) *SpanEnricher {
 	return &SpanEnricher{
 		cfg:            cfg.WithDefaults(),
 		replayRegistry: replayRegistry,
+		exchangeCache:  SharedDataplaneBridge().ExchangeCache(),
 		segments:       expirable.NewLRU[[16]byte, segmentEntry](defaultSegmentCacheSize, nil, defaultSegmentCacheTTL),
 	}
+}
+
+func (e *SpanEnricher) SetExchangeCache(cache *HTTPExchangeCache) {
+	if e == nil {
+		return
+	}
+	e.exchangeCache = cache
 }
 
 func (e *SpanEnricher) AppID() string {
@@ -182,7 +191,7 @@ func (e *SpanEnricher) EnrichSpan(span *request.Span, traceID [16]byte, spanID [
 	case isServerHTTP:
 		mocker = e.buildServletMocker(meta, span)
 	case span.Type == request.EventTypeHTTPClient || (span.Type == request.EventTypeHTTP && span.IsClientSpan()):
-		mocker, err = e.buildHTTPClientMocker(meta, span)
+		mocker, err = e.buildHTTPClientMocker(traceID, meta, span)
 	case span.Type == request.EventTypeSQLClient:
 		mocker, err = e.buildDatabaseMocker(meta, span)
 	case span.Type == request.EventTypeRedisClient:
@@ -259,18 +268,22 @@ func (e *SpanEnricher) buildServletMocker(meta SpanMetadata, span *request.Span)
 	}
 
 	var (
-		queryString string
-		reqHeaders  map[string]string
-		respHeaders map[string]string
-		reqBody     []byte
-		respBody    string
+		queryString  string
+		reqHeaders   map[string]string
+		respHeaders  map[string]string
+		reqEncoding  string
+		respEncoding string
+		reqBody      []byte
+		rawRespBody  []byte
 	)
 	if span.Softprobe != nil {
 		queryString = span.Softprobe.RawQuery
 		reqHeaders = flattenHeaders(span.Softprobe.RequestHeaders)
 		respHeaders = flattenHeaders(span.Softprobe.ResponseHeaders)
+		reqEncoding = headerFirstValueCI(span.Softprobe.RequestHeaders, "Content-Encoding")
+		respEncoding = headerFirstValueCI(span.Softprobe.ResponseHeaders, "Content-Encoding")
 		reqBody = span.Softprobe.RequestBody
-		respBody = string(span.Softprobe.ResponseBody)
+		rawRespBody = span.Softprobe.ResponseBody
 	}
 	if queryString == "" {
 		queryString = queryFromPath(span.FullPath)
@@ -278,14 +291,26 @@ func (e *SpanEnricher) buildServletMocker(meta SpanMetadata, span *request.Span)
 	if len(reqHeaders) == 0 && len(span.RequestHeaders) > 0 {
 		reqHeaders = flattenHeaders(span.RequestHeaders)
 	}
+	if reqEncoding == "" && len(span.RequestHeaders) > 0 {
+		reqEncoding = headerFirstValueCI(span.RequestHeaders, "Content-Encoding")
+	}
 	if len(respHeaders) == 0 && len(span.ResponseHeaders) > 0 {
 		respHeaders = flattenHeaders(span.ResponseHeaders)
+	}
+	if respEncoding == "" && len(span.ResponseHeaders) > 0 {
+		respEncoding = headerFirstValueCI(span.ResponseHeaders, "Content-Encoding")
 	}
 	if len(reqBody) == 0 && span.RequestBodyContent != "" {
 		reqBody = []byte(span.RequestBodyContent)
 	}
-	if respBody == "" && span.ResponseBodyContent != "" {
-		respBody = span.ResponseBodyContent
+	if len(rawRespBody) == 0 && span.ResponseBodyContent != "" {
+		rawRespBody = []byte(span.ResponseBodyContent)
+	}
+
+	reqBody, _ = decodeHTTPBody(reqBody, reqEncoding, e.cfg.MaxBodyBytes)
+	decodedResp, respDecoded := decodeHTTPBody(rawRespBody, respEncoding, e.cfg.MaxBodyBytes)
+	if respDecoded && len(respHeaders) > 0 {
+		respHeaders = stripDecodedHeadersMap(respHeaders, len(decodedResp))
 	}
 
 	return BuildServletMocker(meta, ServletExchange{
@@ -298,11 +323,11 @@ func (e *SpanEnricher) buildServletMocker(meta SpanMetadata, span *request.Span)
 		RequestBody:     reqBody,
 		StatusCode:      span.Status,
 		ResponseHeaders: respHeaders,
-		ResponseBody:    respBody,
+		ResponseBody:    string(decodedResp),
 	})
 }
 
-func (e *SpanEnricher) buildHTTPClientMocker(meta SpanMetadata, span *request.Span) (*SpMocker, error) {
+func (e *SpanEnricher) buildHTTPClientMocker(traceID [16]byte, meta SpanMetadata, span *request.Span) (*SpMocker, error) {
 	opName := stripQuery(span.Path)
 	if opName == "" {
 		opName = stripQuery(span.FullPath)
@@ -314,6 +339,8 @@ func (e *SpanEnricher) buildHTTPClientMocker(meta SpanMetadata, span *request.Sp
 	var (
 		queryString  string
 		contentType  string
+		reqEncoding  string
+		respEncoding string
 		reqBody      []byte
 		respBody     []byte
 		statusReason string
@@ -323,6 +350,8 @@ func (e *SpanEnricher) buildHTTPClientMocker(meta SpanMetadata, span *request.Sp
 	if span.Softprobe != nil {
 		queryString = span.Softprobe.RawQuery
 		contentType = headerFirstValueCI(span.Softprobe.RequestHeaders, "Content-Type")
+		reqEncoding = headerFirstValueCI(span.Softprobe.RequestHeaders, "Content-Encoding")
+		respEncoding = headerFirstValueCI(span.Softprobe.ResponseHeaders, "Content-Encoding")
 		reqBody = span.Softprobe.RequestBody
 		respBody = span.Softprobe.ResponseBody
 		statusReason = span.Softprobe.StatusReason
@@ -334,6 +363,12 @@ func (e *SpanEnricher) buildHTTPClientMocker(meta SpanMetadata, span *request.Sp
 	if contentType == "" && len(span.RequestHeaders) > 0 {
 		contentType = headerFirstValueCI(span.RequestHeaders, "Content-Type")
 	}
+	if reqEncoding == "" && len(span.RequestHeaders) > 0 {
+		reqEncoding = headerFirstValueCI(span.RequestHeaders, "Content-Encoding")
+	}
+	if respEncoding == "" && len(span.ResponseHeaders) > 0 {
+		respEncoding = headerFirstValueCI(span.ResponseHeaders, "Content-Encoding")
+	}
 	if len(reqBody) == 0 && span.RequestBodyContent != "" {
 		reqBody = []byte(span.RequestBodyContent)
 	}
@@ -344,10 +379,46 @@ func (e *SpanEnricher) buildHTTPClientMocker(meta SpanMetadata, span *request.Sp
 		respHeaders, headerTuples = flattenAndTupleHeaders(span.ResponseHeaders)
 	}
 
+	reqBody, _ = decodeHTTPBody(reqBody, reqEncoding, e.cfg.MaxBodyBytes)
+	decodedResp, respDecoded := decodeHTTPBody(respBody, respEncoding, e.cfg.MaxBodyBytes)
+	respBody = decodedResp
+	if respDecoded {
+		respHeaders = stripDecodedHeadersMap(respHeaders, len(respBody))
+		headerTuples = stripDecodedHeaderTuples(headerTuples, len(respBody))
+	}
+
 	statusCode := span.Status
 	if statusCode == 0 {
 		statusCode = http.StatusOK
 	}
+
+	if e.exchangeCache != nil {
+		if captured, ok := e.exchangeCache.ConsumeHTTPClient(traceID, span.Method, opName); ok {
+			if captured.QueryString != "" {
+				queryString = captured.QueryString
+			}
+			if captured.ContentType != "" {
+				contentType = captured.ContentType
+			}
+			if len(captured.RequestBody) >= len(reqBody) {
+				reqBody = captured.RequestBody
+			}
+			if len(captured.ResponseBody) >= len(respBody) {
+				respBody = captured.ResponseBody
+				if len(captured.RespHeaders) > 0 || len(captured.HeaderTuples) > 0 {
+					respHeaders = captured.RespHeaders
+					headerTuples = captured.HeaderTuples
+				}
+			}
+			if captured.StatusCode > 0 {
+				statusCode = captured.StatusCode
+			}
+			if captured.StatusReason != "" {
+				statusReason = captured.StatusReason
+			}
+		}
+	}
+
 	if statusReason == "" {
 		statusReason = http.StatusText(statusCode)
 	}
@@ -372,6 +443,52 @@ func (e *SpanEnricher) buildHTTPClientMocker(meta SpanMetadata, span *request.Sp
 		RequestBody:   reqBody,
 		Response:      wrapper,
 	})
+}
+
+func stripDecodedHeadersMap(in map[string]string, decodedLen int) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	hasContentLen := false
+	for k, v := range in {
+		switch strings.ToLower(strings.TrimSpace(k)) {
+		case "content-encoding", "transfer-encoding":
+			continue
+		case "content-length":
+			out[k] = strconv.Itoa(decodedLen)
+			hasContentLen = true
+		default:
+			out[k] = v
+		}
+	}
+	if !hasContentLen {
+		out["Content-Length"] = strconv.Itoa(decodedLen)
+	}
+	return out
+}
+
+func stripDecodedHeaderTuples(in []HeaderTuple, decodedLen int) []HeaderTuple {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]HeaderTuple, 0, len(in))
+	hasContentLen := false
+	for _, item := range in {
+		switch strings.ToLower(strings.TrimSpace(item.Name)) {
+		case "content-encoding", "transfer-encoding":
+			continue
+		case "content-length":
+			out = append(out, HeaderTuple{Name: item.Name, Value: strconv.Itoa(decodedLen)})
+			hasContentLen = true
+		default:
+			out = append(out, item)
+		}
+	}
+	if !hasContentLen {
+		out = append(out, HeaderTuple{Name: "Content-Length", Value: strconv.Itoa(decodedLen)})
+	}
+	return out
 }
 
 func (e *SpanEnricher) buildDatabaseMocker(meta SpanMetadata, span *request.Span) (*SpMocker, error) {
