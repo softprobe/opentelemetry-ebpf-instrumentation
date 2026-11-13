@@ -14,6 +14,8 @@ const (
 	DefaultMaxBodyBytes          = 262144
 	DefaultRecordRate            = 1.0
 	DefaultExcludeErrorResponses = true
+	DefaultIngressProxyPort      = 18088
+	DefaultEgressProxyPort       = 18089
 )
 
 type Config struct {

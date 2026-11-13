@@ -125,6 +125,23 @@ func runWithContextInfo(
 
 	startHealthCheck(ctx, g, cfg.HealthCheck)
 
+	if cfg.Softprobe.Enabled {
+		spRuntime, err := softprobe.NewRuntime(
+			cfg.Softprobe,
+			softprobe.WithRuntimeReplayRegistry(ctxInfo.SoftprobeReplayRegistry),
+		)
+		if err != nil {
+			return fmt.Errorf("initializing softprobe runtime: %w", err)
+		}
+		if err := spRuntime.Start(ctx); err != nil {
+			return fmt.Errorf("starting softprobe runtime: %w", err)
+		}
+		g.Go(func() error {
+			<-ctx.Done()
+			return spRuntime.Close()
+		})
+	}
+
 	if app {
 		g.Go(func() error {
 			if err := setupAppO11y(ctx, ctxInfo, cfg, selection); err != nil {
