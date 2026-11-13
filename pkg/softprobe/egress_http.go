@@ -83,6 +83,11 @@ type OutgoingProtocolHandler interface {
 	HandleConnection(ctx context.Context, conn OutgoingConnectionContext) error
 }
 
+type ServerFirstProtocolHandler interface {
+	OutgoingProtocolHandler
+	IsServerFirstPort(origPort uint16) bool
+}
+
 type EgressStats struct {
 	LiveForwards     atomic.Uint64
 	MockHits         atomic.Uint64
@@ -116,12 +121,21 @@ func WithHTTPExchangeCache(cache *HTTPExchangeCache) HTTPHandlerOption {
 	}
 }
 
+func WithHTTPLogExporter(exp *LogExporter) HTTPHandlerOption {
+	return func(h *HTTPProtocolHandler) {
+		if exp != nil {
+			h.logExporter = exp
+		}
+	}
+}
+
 type HTTPProtocolHandler struct {
 	cfg             Config
 	ca              *EphemeralCA
 	replayRegistry  *ReplayRegistry
 	writeTracker    *WriteContextTracker
 	exchangeCache   *HTTPExchangeCache
+	logExporter     *LogExporter
 	backendClient   *BackendClient
 	upstreamBaseTLS *tls.Config
 	dialContext     func(ctx context.Context, network, address string) (net.Conn, error)
@@ -675,10 +689,12 @@ func (h *HTTPProtocolHandler) handleReplayOutbound(
 	if h.backendClient == nil {
 		if localIgnored {
 			h.stats.SkipMockForwards.Add(1)
+			h.emitReplayAgentLog(sess, serverSpanID, "INFO", fmt.Sprintf("softprobe replay local-ignore forwarded HttpClient %s %s", req.Method, reqPath))
 			resp, err := h.forwardLiveRequest(ctx, req, rawReqBody, oc.OrigDst, isTLS, sni)
 			return resp, false, err
 		}
 		h.stats.EmptyMissBlocks.Add(1)
+		h.emitReplayAgentLog(sess, serverSpanID, "WARN", fmt.Sprintf("softprobe replay mock miss HttpClient %s %s", req.Method, reqPath))
 		return synthesizeErrorResponse(req, ErrorCodeMockMiss, fmt.Sprintf("replay mock miss for %s %s", req.Method, reqPath)), false, nil
 	}
 
@@ -710,6 +726,7 @@ func (h *HTTPProtocolHandler) handleReplayOutbound(
 	})
 	if err != nil {
 		h.stats.EmptyMissBlocks.Add(1)
+		h.emitReplayAgentLog(sess, serverSpanID, "WARN", fmt.Sprintf("softprobe replay query build error HttpClient %s %s", req.Method, reqPath))
 		return synthesizeErrorResponse(req, ErrorCodeQueryError, err.Error()), false, nil
 	}
 	if queryMocker.TargetResponse == nil {
@@ -724,10 +741,12 @@ func (h *HTTPProtocolHandler) handleReplayOutbound(
 	if qErr != nil {
 		if localIgnored {
 			h.stats.SkipMockForwards.Add(1)
+			h.emitReplayAgentLog(sess, serverSpanID, "INFO", fmt.Sprintf("softprobe replay local-ignore forwarded HttpClient %s %s", req.Method, reqPath))
 			resp, fwdErr := h.forwardLiveRequest(ctx, req, rawReqBody, oc.OrigDst, isTLS, sni)
 			return resp, false, fwdErr
 		}
 		h.stats.EmptyMissBlocks.Add(1)
+		h.emitReplayAgentLog(sess, serverSpanID, "WARN", fmt.Sprintf("softprobe replay query failed HttpClient %s %s", req.Method, reqPath))
 		return synthesizeErrorResponse(req, ErrorCodeQueryError, qErr.Error()), false, nil
 	}
 
@@ -736,17 +755,21 @@ func (h *HTTPProtocolHandler) handleReplayOutbound(
 		wrapper, decodeErr := DecodeHTTPClientResponse(qRes.Mocker)
 		if decodeErr != nil {
 			h.stats.EmptyMissBlocks.Add(1)
+			h.emitReplayAgentLog(sess, serverSpanID, "WARN", fmt.Sprintf("softprobe replay decode failed HttpClient %s %s", req.Method, reqPath))
 			return synthesizeErrorResponse(req, ErrorCodeQueryError, decodeErr.Error()), false, nil
 		}
 		h.stats.MockHits.Add(1)
+		h.emitReplayAgentLog(sess, serverSpanID, "INFO", fmt.Sprintf("softprobe replay mock hit HttpClient %s %s", req.Method, reqPath))
 		return buildSynthesizedHTTPResponse(req, wrapper), false, nil
 
 	case QueryOutcomeMustMock:
 		h.stats.MustMockBlocks.Add(1)
+		h.emitReplayAgentLog(sess, serverSpanID, "WARN", fmt.Sprintf("softprobe replay MUST_MOCK blocked HttpClient %s %s", req.Method, reqPath))
 		return synthesizeErrorResponse(req, ErrorCodeMustMock, fmt.Sprintf("outbound %s %s blocked by MUST_MOCK policy", req.Method, reqPath)), false, nil
 
 	case QueryOutcomeSkipMock:
 		h.stats.SkipMockForwards.Add(1)
+		h.emitReplayAgentLog(sess, serverSpanID, "INFO", fmt.Sprintf("softprobe replay skip-mock forwarded HttpClient %s %s", req.Method, reqPath))
 		realResp, fwdErr := h.forwardLiveRequest(ctx, req, rawReqBody, oc.OrigDst, isTLS, sni)
 		if fwdErr != nil {
 			return nil, true, fwdErr
@@ -759,12 +782,37 @@ func (h *HTTPProtocolHandler) handleReplayOutbound(
 	default:
 		if localIgnored {
 			h.stats.SkipMockForwards.Add(1)
+			h.emitReplayAgentLog(sess, serverSpanID, "INFO", fmt.Sprintf("softprobe replay local-ignore forwarded HttpClient %s %s", req.Method, reqPath))
 			realResp, fwdErr := h.forwardLiveRequest(ctx, req, rawReqBody, oc.OrigDst, isTLS, sni)
 			return realResp, false, fwdErr
 		}
 		h.stats.EmptyMissBlocks.Add(1)
+		h.emitReplayAgentLog(sess, serverSpanID, "WARN", fmt.Sprintf("softprobe replay mock miss HttpClient %s %s", req.Method, reqPath))
 		return synthesizeErrorResponse(req, ErrorCodeMockMiss, fmt.Sprintf("replay mock miss for %s %s", req.Method, reqPath)), false, nil
 	}
+}
+
+func (h *HTTPProtocolHandler) emitReplayAgentLog(sess *ReplaySession, spanID [8]byte, severity, body string) {
+	if h.logExporter == nil || sess == nil {
+		return
+	}
+	logTraceID := sess.TraceID
+	if sess.RecordedTraceID != "" {
+		if parsed, err := ParseTraceIDHex(sess.RecordedTraceID); err == nil {
+			logTraceID = parsed
+		}
+	}
+	if logTraceID == ([16]byte{}) {
+		return
+	}
+	h.logExporter.Enqueue(LogRecordInput{
+		TraceID:      logTraceID,
+		SpanID:       spanID,
+		Source:       LogSourceAgent,
+		ReplayID:     sess.ReplayID,
+		SeverityText: severity,
+		Body:         body,
+	})
 }
 
 func (h *HTTPProtocolHandler) reportRealCallResponse(

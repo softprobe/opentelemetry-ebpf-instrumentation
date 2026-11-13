@@ -149,6 +149,9 @@ func (tr *tracesOTELReceiver) provideLoop(ctx context.Context) {
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultTraceShutdownTimeout)
 		defer cancel()
+		if tr.softprobeEnricher != nil {
+			_ = tr.softprobeEnricher.Close(shutdownCtx)
+		}
 		err := exp.Shutdown(shutdownCtx)
 		if err != nil {
 			slog.Error("error shutting down traces exporter", "error", err)
