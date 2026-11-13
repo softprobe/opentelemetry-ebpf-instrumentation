@@ -794,12 +794,18 @@ func (p *Tracer) Run(
 		ebpfconvenience.DrainTraceContextMap[BpfObiCtxInfoT](p.log, p.bpfObjects.TracesCtxV1)
 	}
 
-	timeoutTicker := time.NewTicker(2 * time.Second)
+	timeoutSweepInterval := 2 * time.Second
+	lingeringHTTPIdle := 10 * time.Second
+	if p.cfg.Softprobe.Enabled {
+		timeoutSweepInterval = 500 * time.Millisecond
+		lingeringHTTPIdle = time.Second
+	}
+	timeoutTicker := time.NewTicker(timeoutSweepInterval)
 	parseContext := ebpfcommon.NewEBPFParseContext(&p.cfg.EBPF, eventsChan, p.pidsFilter)
 	defer parseContext.Close()
 
 	go p.watchForMisclassifedEvents(ctx)
-	go p.lookForTimeouts(ctx, parseContext, timeoutTicker, eventsChan)
+	go p.lookForTimeouts(ctx, parseContext, timeoutTicker, lingeringHTTPIdle, eventsChan)
 	defer timeoutTicker.Stop()
 
 	p.runItersForPids()
@@ -1018,7 +1024,7 @@ func (p *Tracer) parseJVMMemoryPoolRecord(record *ringbuf.Record) ([]jvmruntime.
 }
 
 //nolint:cyclop
-func (p *Tracer) lookForTimeouts(ctx context.Context, parseCtx *ebpfcommon.EBPFParseContext, ticker *time.Ticker, eventsChan *msg.Queue[[]request.Span]) {
+func (p *Tracer) lookForTimeouts(ctx context.Context, parseCtx *ebpfcommon.EBPFParseContext, ticker *time.Ticker, lingeringHTTPIdle time.Duration, eventsChan *msg.Queue[[]request.Span]) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -1033,7 +1039,7 @@ func (p *Tracer) lookForTimeouts(ctx context.Context, parseCtx *ebpfcommon.EBPFP
 					// but it hasn't been posted yet, likely missed by the logic that looks at finishing requests
 					// where we track the full response. If we haven't updated the EndMonotimeNs in more than some
 					// short interval, we are likely not going to finish this request from eBPF, so let's do it here.
-					if v.EndMonotimeNs != 0 && v.Submitted == 0 && t.After(timing.KernelTime(v.EndMonotimeNs).Add(10*time.Second)) {
+					if v.EndMonotimeNs != 0 && v.Submitted == 0 && t.After(timing.KernelTime(v.EndMonotimeNs).Add(lingeringHTTPIdle)) {
 						// Must use unsafe here, the two bpfHttpInfoTs are the same but generated from different
 						// ebpf2go outputs
 						s, ignore, err := ebpfcommon.HTTPInfoEventToSpan(parseCtx, (*ebpfcommon.BPFHTTPInfo)(unsafe.Pointer(&v)))

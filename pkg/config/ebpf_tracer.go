@@ -194,6 +194,8 @@ type EBPFTracer struct {
 
 	// Disables uprobe_multi support for testing. This option is intentionally environment-only.
 	DisableUprobeMulti bool `yaml:"-" json:"-" env:"OTEL_EBPF_DEBUG_DISABLE_UPROBE_MULTI"`
+
+	SoftprobeCaptureMaxBytes int `yaml:"-" json:"-" env:"-"`
 }
 
 var nvidiaSMIExistsFunc = nvidiaSMIExists

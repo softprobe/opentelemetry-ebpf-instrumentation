@@ -37,6 +37,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/internal/shardedqueue"
 	"go.opentelemetry.io/obi/pkg/obi"
 	"go.opentelemetry.io/obi/pkg/pipe/msg"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 )
 
 //go:generate $BPF2GO -cc $BPF_CLANG -cflags $BPF_CFLAGS -type log_event_t -type log_pipe_key_t -target $BPF_TARGETS Bpf ../../../../bpf/logenricher/logenricher.c -- -I../../../../bpf -I../../../../bpf
@@ -87,22 +88,23 @@ const (
 )
 
 type Tracer struct {
-	ctx         context.Context
-	cfg         *obi.Config
-	metrics     imetrics.Reporter
-	bpfObjects  BpfObjects
-	closers     []io.Closer
-	log         *slog.Logger
-	fdCache     *expirable.LRU[string, *destFile]
-	asyncWriter *shardedqueue.ShardedQueue[LogEvent]
-	formatter   logFormatter
-	pids        map[uint64][]uint64       // pid:[]nsPids
-	pidServices map[uint32]*exec.FileInfo // host pid -> file info, for run-time OTel-export check in handle()
-	pidsMU      sync.Mutex
-	trackedPids map[uint32]struct{}          // host pids currently allowed
-	logPipes    map[pipeKey]map[uint32][]int // log pipe -> host pid -> fds (1 and/or 2)
-	pidPipes    map[uint32]map[int]pipeKey   // host pid -> fd -> registered log pipe
-	pipesMU     sync.RWMutex                 // guards trackedPids, logPipes, pidPipes; hot-path readers vs reconcile
+	ctx           context.Context
+	cfg           *obi.Config
+	metrics       imetrics.Reporter
+	bpfObjects    BpfObjects
+	closers       []io.Closer
+	log           *slog.Logger
+	fdCache       *expirable.LRU[string, *destFile]
+	asyncWriter   *shardedqueue.ShardedQueue[LogEvent]
+	formatter     logFormatter
+	softprobeLogs *softprobe.LogExporter
+	pids          map[uint64][]uint64       // pid:[]nsPids
+	pidServices   map[uint32]*exec.FileInfo // host pid -> file info, for run-time OTel-export check in handle()
+	pidsMU        sync.Mutex
+	trackedPids   map[uint32]struct{}          // host pids currently allowed
+	logPipes      map[pipeKey]map[uint32][]int // log pipe -> host pid -> fds (1 and/or 2)
+	pidPipes      map[uint32]map[int]pipeKey   // host pid -> fd -> registered log pipe
+	pipesMU       sync.RWMutex                 // guards trackedPids, logPipes, pidPipes; hot-path readers vs reconcile
 }
 
 func New(cfg *obi.Config, metrics imetrics.Reporter) *Tracer {
@@ -120,12 +122,13 @@ func New(cfg *obi.Config, metrics imetrics.Reporter) *Tracer {
 		fdCache: expirable.NewLRU[string, *destFile](cfg.EBPF.LogEnricher.CacheSize, func(_ string, d *destFile) {
 			d.release()
 		}, cfg.EBPF.LogEnricher.CacheTTL),
-		formatter:   newLogFormatter(cfg.EBPF.LogEnricher),
-		pids:        make(map[uint64][]uint64),
-		pidServices: make(map[uint32]*exec.FileInfo),
-		trackedPids: make(map[uint32]struct{}),
-		logPipes:    make(map[pipeKey]map[uint32][]int),
-		pidPipes:    make(map[uint32]map[int]pipeKey),
+		formatter:     newLogFormatter(cfg.EBPF.LogEnricher),
+		softprobeLogs: softprobe.NewLogExporter(cfg.Softprobe, softprobe.SharedReplayRegistry()),
+		pids:          make(map[uint64][]uint64),
+		pidServices:   make(map[uint32]*exec.FileInfo),
+		trackedPids:   make(map[uint32]struct{}),
+		logPipes:      make(map[pipeKey]map[uint32][]int),
+		pidPipes:      make(map[uint32]map[int]pipeKey),
 	}
 
 	asyncWriter := shardedqueue.NewShardedQueue[LogEvent](
@@ -173,6 +176,11 @@ func (p *Tracer) AddCloser(c ...io.Closer) {
 
 func (p *Tracer) Close() error {
 	p.asyncWriter.Close()
+	if p.softprobeLogs != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = p.softprobeLogs.Close(shutdownCtx)
+		cancel()
+	}
 	p.fdCache.Purge()
 	return ebpfcommon.CloseResources(append(p.closers, &p.bpfObjects)...)
 }
@@ -319,7 +327,7 @@ func (p *Tracer) removePID(key uint64) error {
 
 func (p *Tracer) AllowPID(pid app.PID, ns uint32, fi *exec.FileInfo) {
 	// instrumented processes the log enricher selection did not match keep their logs untouched
-	if !fi.LogEnricherEnabled() {
+	if !fi.LogEnricherEnabled() || int(pid) == os.Getpid() {
 		return
 	}
 
@@ -793,6 +801,20 @@ func (p *Tracer) handle(e LogEvent) {
 	spanID := trace.SpanID(e.orig.Ctx.SpanId)
 	traceID := trace.TraceID(e.orig.Ctx.TraceId)
 	includeSpan := !p.shouldOmitSpanID(e.orig.Tgid)
+
+	if p.softprobeLogs != nil {
+		var exportedSpanID [8]byte
+		if includeSpan {
+			exportedSpanID = e.orig.Ctx.SpanId
+		}
+		p.softprobeLogs.Enqueue(softprobe.LogRecordInput{
+			Timestamp: time.Now(),
+			TraceID:   e.orig.Ctx.TraceId,
+			SpanID:    exportedSpanID,
+			Body:      e.logLine,
+			FD:        int(e.orig.Fd),
+		})
+	}
 
 	out, err := p.formatter.format([]byte(e.logLine), traceID.String(), spanID.String(), includeSpan)
 	if err != nil {
