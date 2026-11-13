@@ -44,6 +44,7 @@ func V2ToRuntime(src *schema.Extension) (*obi.Config, error) {
 	defaults.Enrich.ServiceName.Sources = []transform.Source{transform.SourceK8s, transform.SourceECS, transform.SourceRoute53}
 	// Omitted features retain the protocol and network enablement mapping.
 	defaults.Capture.Metrics.Features = nil
+	defaults.Softprobe = defaultSoftprobeExtension()
 	var complete bool
 	var err error
 	src, complete, err = src.WithDefaults(defaults)
@@ -97,6 +98,9 @@ func V2ToRuntime(src *schema.Extension) (*obi.Config, error) {
 	applyV2Capture(&cfg, src, policy, complete)
 	applyV2Standalone(&cfg, src, complete)
 	if err := applyV2PeerMetadata(&cfg, src.Enrich, complete); err != nil {
+		return nil, err
+	}
+	if err := applyV2Softprobe(&cfg, src.Softprobe, complete); err != nil {
 		return nil, err
 	}
 	if err := applyV2CaptureAttributes(&cfg, src); err != nil {

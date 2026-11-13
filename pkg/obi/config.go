@@ -42,6 +42,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/kube/kubeflags"
 	"go.opentelemetry.io/obi/pkg/metadata"
 	"go.opentelemetry.io/obi/pkg/metadata/peer"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 	"go.opentelemetry.io/obi/pkg/transform"
 )
 
@@ -230,6 +231,7 @@ var DefaultConfig = Config{
 		InstrumentCuda: config.CudaModeAuto,
 	},
 	PeerMetadata: peer.DefaultConfig(),
+	Softprobe:    softprobe.DefaultConfig(),
 	CloudMetadata: transform.CloudMetadataConfig{
 		RefreshInterval: 30 * time.Second,
 		Route53:         transform.Route53MetadataConfig{RefreshInterval: cloud.DefaultRoute53RefreshInterval},
@@ -403,9 +405,10 @@ type Config struct {
 	Prometheus   prom.PrometheusConfig         `yaml:"prometheus_export"`
 	TracePrinter debug.TracePrinter            `yaml:"trace_printer" env:"OTEL_EBPF_TRACE_PRINTER"`
 
-	// Exceptions and Logs are set only by config v2.
+	// Exceptions, Logs, and Softprobe are set only by config v2.
 	Exceptions services.ExceptionsConfig `yaml:"-" env:"-"`
 	Logs       otelcfg.LogsConfig        `yaml:"-" env:"-"`
+	Softprobe  softprobe.Config          `yaml:"-" env:"-" jsonschema:"-" validate:"-"`
 
 	// Exec allows selecting the instrumented executable whose complete path contains the Exec value.
 	//
@@ -930,7 +933,7 @@ func (c *Config) validate(context validationContext) error {
 
 	if applicationEnabled && !c.TracePrinter.Enabled() &&
 		!otelMetricsEnabled && !tracesEnabled && !c.Logs.Enabled() &&
-		!c.Prometheus.EndpointEnabled() && !c.TracePrinter.Enabled() {
+		!c.Prometheus.EndpointEnabled() && !c.Softprobe.Enabled {
 		return ConfigError("you need to define at least one exporter: trace_printer," +
 			" otel_metrics_export, otel_traces_export or prometheus_export")
 	}
@@ -955,6 +958,9 @@ func (c *Config) validate(context validationContext) error {
 	}
 
 	if err := c.PeerMetadata.Validate(); err != nil {
+		return ConfigError(err.Error())
+	}
+	if err := c.Softprobe.Validate(); err != nil {
 		return ConfigError(err.Error())
 	}
 
