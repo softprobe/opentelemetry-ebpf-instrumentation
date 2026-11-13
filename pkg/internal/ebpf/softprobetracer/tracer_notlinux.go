@@ -35,6 +35,9 @@ func New(_ *obi.Config, _ imetrics.Reporter, _ ebpfcommon.ServiceFilter) *Tracer
 func (p *Tracer) SetWriteTracker(_ *softprobe.WriteContextTracker)               {}
 func (p *Tracer) WriteTracker() *softprobe.WriteContextTracker                   { return nil }
 func (p *Tracer) LookupOrigDst(_ net.Addr) (uint64, OrigDst, bool)               { return 0, OrigDst{}, false }
+func (p *Tracer) LookupEgressTarget(_ net.Addr) (softprobe.EgressTarget, bool) {
+	return softprobe.EgressTarget{}, false
+}
 func (p *Tracer) LookupOrigDstByCookie(_ uint64) (OrigDst, bool)                 { return OrigDst{}, false }
 func (p *Tracer) RegisterIngressListener(_ net.Listener) error                   { return nil }
 func (p *Tracer) RegisterAppPort(_ uint16) error                                 { return nil }

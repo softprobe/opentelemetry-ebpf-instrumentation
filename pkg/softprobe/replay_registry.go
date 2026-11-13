@@ -330,6 +330,38 @@ func (t *WriteContextTracker) LookupAtOffset(sockCookie, byteOffset uint64) (Soc
 	return SocketWriteContext{}, false
 }
 
+func (t *WriteContextTracker) LookupInRange(sockCookie, startOffset, endOffset uint64) (SocketWriteContext, bool) {
+	if endOffset <= startOffset {
+		return t.LookupAtOffset(sockCookie, startOffset)
+	}
+
+	t.mu.RLock()
+	ring, ok := t.sockets.Get(sockCookie)
+	if ok && ring != nil && len(ring.entries) > 0 {
+		var fallback *SocketWriteContext
+		for _, entry := range slices.Backward(ring.entries) {
+			entryEnd := entry.ByteOffset + uint64(max(entry.PayloadLen, 1))
+			if entry.ByteOffset < endOffset && entryEnd > startOffset {
+				if entry.TraceID != ([16]byte{}) {
+					t.mu.RUnlock()
+					return cloneWriteContext(entry), true
+				}
+				if fallback == nil {
+					cp := cloneWriteContext(entry)
+					fallback = &cp
+				}
+			}
+		}
+		if fallback != nil {
+			t.mu.RUnlock()
+			return *fallback, true
+		}
+	}
+	t.mu.RUnlock()
+
+	return t.LookupAtOffset(sockCookie, endOffset-1)
+}
+
 func (t *WriteContextTracker) EvictSocket(sockCookie uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
