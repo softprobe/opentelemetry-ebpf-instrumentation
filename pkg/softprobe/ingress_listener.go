@@ -41,11 +41,20 @@ func WithIngressDialer(dialFn func(ctx context.Context, network, address string)
 	}
 }
 
+func WithIngressLogExporter(exp *LogExporter) IngressOption {
+	return func(l *IngressListener) {
+		if exp != nil {
+			l.logExporter = exp
+		}
+	}
+}
+
 type IngressListener struct {
 	cfg            Config
 	replayRegistry *ReplayRegistry
 	backendClient  *BackendClient
 	bridge         *DataplaneBridge
+	logExporter    *LogExporter
 	resolveTarget  func(net.Conn) (string, error)
 	dialContext    func(ctx context.Context, network, address string) (net.Conn, error)
 	log            *slog.Logger
@@ -368,6 +377,7 @@ func (l *IngressListener) handleReplayRequest(
 	endTime := time.Now()
 
 	l.commitReplayServletResult(ctx, inConn, req, capturedReq.Bytes(), resp, wireRespBody, meta, sess, startTime, endTime)
+	l.emitReplayServletLog(req, resp.StatusCode, meta, sess)
 
 	if sess.ReplayID != "" {
 		resp.Header.Set(HeaderReplayID, sess.ReplayID)
@@ -382,6 +392,38 @@ func (l *IngressListener) handleReplayRequest(
 		return false
 	}
 	return !req.Close && !resp.Close
+}
+
+func (l *IngressListener) emitReplayServletLog(
+	req *http.Request,
+	statusCode int,
+	meta InboundReplayMetadata,
+	sess *ReplaySession,
+) {
+	if l.logExporter == nil || req == nil || sess == nil {
+		return
+	}
+	logTraceID := meta.TraceContext.TraceID
+	if sess.RecordedTraceID != "" {
+		if parsed, err := ParseTraceIDHex(sess.RecordedTraceID); err == nil {
+			logTraceID = parsed
+		}
+	}
+	if logTraceID == ([16]byte{}) {
+		logTraceID = sess.TraceID
+	}
+	reqPath := "/"
+	if req.URL != nil && req.URL.Path != "" {
+		reqPath = req.URL.Path
+	}
+	l.logExporter.Enqueue(LogRecordInput{
+		TraceID:      logTraceID,
+		SpanID:       meta.TraceContext.SpanID,
+		Source:       LogSourceAgent,
+		ReplayID:     sess.ReplayID,
+		SeverityText: "INFO",
+		Body:         fmt.Sprintf("softprobe replayed Servlet %s %s status=%d", req.Method, reqPath, statusCode),
+	})
 }
 
 func (l *IngressListener) commitReplayServletResult(

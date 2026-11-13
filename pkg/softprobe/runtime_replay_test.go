@@ -4,12 +4,14 @@
 package softprobe
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +19,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 
+	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/otel/trace"
 
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
@@ -345,9 +349,7 @@ func TestEgressTLSPooledKeepAliveMixedLiveAndReplayHit(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, rt.Start(ctx))
+	require.NoError(t, rt.Start(t.Context()))
 	defer func() { _ = rt.Close() }()
 
 	var rawWrittenOffset atomic.Uint64
@@ -502,9 +504,7 @@ func TestMustMockAndEmptyMissNeverDialUpstream(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, rt.Start(ctx))
+	require.NoError(t, rt.Start(t.Context()))
 	defer func() { _ = rt.Close() }()
 
 	egressAddr := rt.EgressAddr().String()
@@ -682,9 +682,7 @@ func TestEgressSkipMockReportsRealCallResultAndHTTP2Replay(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, rt.Start(ctx))
+	require.NoError(t, rt.Start(t.Context()))
 	defer func() { _ = rt.Close() }()
 
 	egressAddr := rt.EgressAddr().String()
@@ -840,9 +838,7 @@ func TestEgressLiveHTTPSGzipCaptureEnrichesTruncatedSpan(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, rt.Start(ctx))
+	require.NoError(t, rt.Start(t.Context()))
 	defer func() { _ = rt.Close() }()
 
 	egressAddr := rt.EgressAddr().String()
@@ -926,4 +922,362 @@ func TestEgressLiveHTTPSGzipCaptureEnrichesTruncatedSpan(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, fullUpstreamJSON, string(respPayload))
 	assert.Empty(t, wrapper.Headers["Content-Encoding"])
+}
+
+func TestRuntimeReplayEmitsAgentCorrelatedOTLPLogs(t *testing.T) {
+	const (
+		recordedTraceHex = "ab12cd34ef567890ab12cd34ef567890"
+		replayIDHex      = "445566778899aabb"
+		segmentIDHex     = "1122334455667788"
+	)
+
+	var (
+		logsMu   sync.Mutex
+		received []plog.Logs
+	)
+	vectorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var unmarshaler plog.ProtoUnmarshaler
+		ld, err := unmarshaler.UnmarshalLogs(body)
+		if !assert.NoError(t, err) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		logsMu.Lock()
+		received = append(received, ld)
+		logsMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vectorSrv.Close()
+
+	mockBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/storage/record/query":
+			body, readErr := io.ReadAll(r.Body)
+			assert.NoError(t, readErr)
+			qm := decodePostedMockerForTest(t, body)
+			w.Header().Set("Content-Type", "application/zstd")
+			if qm.CategoryType == CategoryServlet {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(EmptyInstanceZstdBytes)
+				return
+			}
+			mockPayload := []byte(`{"status":"CONFIRMED"}`)
+			hit, buildErr := BuildHTTPClientMocker(SpanMetadata{
+				AppID:     "travel-ota",
+				TraceID:   recordedTraceHex,
+				ReplayID:  replayIDHex,
+				SegmentID: segmentIDHex,
+			}, HTTPClientExchange{
+				Method:        http.MethodPost,
+				OperationName: qm.OperationName,
+				Response: &HTTPResponseWrapper{
+					Status:     http.StatusOK,
+					StatusCode: http.StatusOK,
+					Reason:     "OK",
+					Headers:    map[string]string{"Content-Type": "application/json"},
+					BodyBase64: base64.StdEncoding.EncodeToString(mockPayload),
+					Body:       string(mockPayload),
+				},
+			})
+			assert.NoError(t, buildErr)
+			hit.ID = "mock-order-1"
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(zstdCompressForTest(t, hit))
+		case "/api/config/agent/agentStatus":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockBackend.Close()
+
+	deadEndLn, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer deadEndLn.Close()
+	origDst, err := netip.ParseAddrPort(deadEndLn.Addr().String())
+	require.NoError(t, err)
+
+	lnIngressProbe, err := ListenNonMPTCP(context.Background(), "tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	ingressPort := int(extractPortFromAddr(lnIngressProbe.Addr()))
+	_ = lnIngressProbe.Close()
+
+	lnEgressProbe, err := ListenNonMPTCP(context.Background(), "tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	egressPort := int(extractPortFromAddr(lnEgressProbe.Addr()))
+	_ = lnEgressProbe.Close()
+
+	reg := NewReplayRegistry(64, time.Minute)
+	bridge := NewDataplaneBridge(NewWriteContextTracker(64, time.Minute))
+
+	var egressAddrAtomic atomic.Value
+	var caPoolAtomic atomic.Value
+
+	appSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		egressAddr, _ := egressAddrAtomic.Load().(string)
+		rootPool, _ := caPoolAtomic.Load().(*tls.Config)
+		outClient := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: rootPool,
+				DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(dialCtx, "tcp4", egressAddr)
+				},
+			},
+		}
+		outReq, reqErr := http.NewRequestWithContext(r.Context(), http.MethodPost, "https://spair.softprobe.ai/ndc/v21.3/ordercreate", bytes.NewReader([]byte(`{"offer":"1"}`)))
+		if !assert.NoError(t, reqErr) {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		outReq.Header.Set(HeaderTraceparent, r.Header.Get(HeaderTraceparent))
+		outResp, doErr := outClient.Do(outReq)
+		if !assert.NoError(t, doErr) {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		outBody, _ := io.ReadAll(outResp.Body)
+		_ = outResp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(outResp.StatusCode)
+		_, _ = w.Write(outBody)
+	}))
+	defer appSrv.Close()
+	appHostPort := appSrv.Listener.Addr().String()
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.AppID = "travel-ota"
+	cfg.BackendURL = mockBackend.URL
+	cfg.VectorLogsURL = vectorSrv.URL + "/v1/logs"
+	cfg.IngressProxyPort = ingressPort
+	cfg.EgressProxyPort = egressPort
+
+	rt, err := NewRuntime(
+		cfg,
+		WithRuntimeCACertPath(filepath.Join(t.TempDir(), "sp-obi-ca.pem")),
+		WithRuntimeReplayRegistry(reg),
+		WithRuntimeDataplaneBridge(bridge),
+		WithRuntimeIngressOptions(WithIngressTargetResolver(func(_ net.Conn) (string, error) {
+			return appHostPort, nil
+		})),
+		WithRuntimeEgressTargetResolver(func(_ net.Addr) (EgressTarget, bool) {
+			return EgressTarget{SockCookie: 501, AddrPort: origDst, PID: 777}, true
+		}),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, rt.LogExporter())
+
+	egressAddrAtomic.Store(fmt.Sprintf("127.0.0.1:%d", egressPort))
+	caPoolAtomic.Store(&tls.Config{
+		RootCAs:    rt.CA().CertPool(),
+		ServerName: "spair.softprobe.ai",
+	})
+
+	require.NoError(t, rt.Start(t.Context()))
+
+	replayReq, err := http.NewRequest(http.MethodPost, "http://"+rt.IngressAddr().String()+"/api/orders", bytes.NewReader([]byte(`{"pax":"A"}`)))
+	require.NoError(t, err)
+	replayReq.Header.Set("Content-Type", "application/json")
+	replayReq.Header.Set(HeaderScheduleReplay, "true")
+	replayReq.Header.Set(HeaderTracestate, "sp=mode:replay;tid:"+recordedTraceHex+";rid:"+replayIDHex)
+	replayReq.Header.Set(HeaderSegmentID, segmentIDHex)
+
+	replayResp, err := http.DefaultClient.Do(replayReq)
+	require.NoError(t, err)
+	respBody, err := io.ReadAll(replayResp.Body)
+	_ = replayResp.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, replayResp.StatusCode)
+	assert.JSONEq(t, `{"status":"CONFIRMED"}`, string(respBody))
+	assert.Equal(t, replayIDHex, replayResp.Header.Get(HeaderReplayID))
+
+	require.NoError(t, rt.Close())
+
+	logsMu.Lock()
+	defer logsMu.Unlock()
+
+	var agentRecords []plog.LogRecord
+	for _, ld := range received {
+		for i := 0; i < ld.ResourceLogs().Len(); i++ {
+			rl := ld.ResourceLogs().At(i)
+			for j := 0; j < rl.ScopeLogs().Len(); j++ {
+				sl := rl.ScopeLogs().At(j)
+				for k := 0; k < sl.LogRecords().Len(); k++ {
+					lr := sl.LogRecords().At(k)
+					if src, ok := lr.Attributes().Get("sp.source"); ok && src.Str() == LogSourceAgent {
+						agentRecords = append(agentRecords, lr)
+					}
+				}
+			}
+		}
+	}
+	require.GreaterOrEqual(t, len(agentRecords), 2)
+
+	var sawServletReplay, sawHTTPClientHit bool
+	for _, lr := range agentRecords {
+		assert.Equal(t, recordedTraceHex, lr.TraceID().String())
+		repAttr, ok := lr.Attributes().Get("sp.replay_id")
+		require.True(t, ok)
+		assert.Equal(t, replayIDHex, repAttr.Str())
+		body := lr.Body().Str()
+		if strings.Contains(body, "softprobe replayed Servlet POST /api/orders") {
+			sawServletReplay = true
+		}
+		if strings.Contains(body, "softprobe replay mock hit HttpClient POST /ndc/v21.3/ordercreate") {
+			sawHTTPClientHit = true
+		}
+	}
+	assert.True(t, sawServletReplay, "expected IngressListener replay agent log")
+	assert.True(t, sawHTTPClientHit, "expected HTTPProtocolHandler replay hit agent log")
+}
+
+type fakeServerFirstHandler struct {
+	port        uint16
+	greeting    string
+	serverFirst bool
+	peekLenCh   chan int
+}
+
+func (f *fakeServerFirstHandler) Name() string {
+	return "fake-server-first"
+}
+
+func (f *fakeServerFirstHandler) IsServerFirstPort(origPort uint16) bool {
+	return f.serverFirst && origPort == f.port
+}
+
+func (f *fakeServerFirstHandler) CanHandle(preamble []byte, origPort uint16) bool {
+	if origPort != f.port {
+		return false
+	}
+	select {
+	case f.peekLenCh <- len(preamble):
+	default:
+	}
+	return true
+}
+
+func (f *fakeServerFirstHandler) HandleConnection(_ context.Context, conn OutgoingConnectionContext) error {
+	if _, err := io.WriteString(conn.ClientConn, f.greeting); err != nil {
+		return err
+	}
+	line, err := conn.BufReader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(conn.ClientConn, "ack:"+line)
+	return err
+}
+
+type fakeEmptyPreamblePortHandler struct {
+	port      uint16
+	greeting  string
+	peekLenCh chan int
+}
+
+func (f *fakeEmptyPreamblePortHandler) Name() string {
+	return "fake-empty-preamble"
+}
+
+func (f *fakeEmptyPreamblePortHandler) CanHandle(preamble []byte, origPort uint16) bool {
+	if origPort != f.port {
+		return false
+	}
+	select {
+	case f.peekLenCh <- len(preamble):
+	default:
+	}
+	return true
+}
+
+func (f *fakeEmptyPreamblePortHandler) HandleConnection(_ context.Context, conn OutgoingConnectionContext) error {
+	_, err := io.WriteString(conn.ClientConn, f.greeting)
+	return err
+}
+
+func TestRuntimeEgressServerSpeaksFirstHandlerDispatch(t *testing.T) {
+	lnEgressProbe, err := ListenNonMPTCP(context.Background(), "tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	egressPort := int(extractPortFromAddr(lnEgressProbe.Addr()))
+	_ = lnEgressProbe.Close()
+
+	var targetPort atomic.Uint32
+	targetPort.Store(3306)
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.AppID = "travel-ota"
+	cfg.IngressProxyPort = -1
+	cfg.EgressProxyPort = egressPort
+
+	rt, err := NewRuntime(
+		cfg,
+		WithRuntimeCACertPath(filepath.Join(t.TempDir(), "sp-obi-ca.pem")),
+		WithRuntimeReplayRegistry(NewReplayRegistry(32, time.Minute)),
+		WithRuntimeDataplaneBridge(NewDataplaneBridge(NewWriteContextTracker(32, time.Minute))),
+		WithRuntimeEgressTargetResolver(func(_ net.Addr) (EgressTarget, bool) {
+			p := uint16(targetPort.Load())
+			return EgressTarget{
+				SockCookie: 901,
+				AddrPort:   netip.AddrPortFrom(netip.MustParseAddr("10.0.0.12"), p),
+				PID:        999,
+			}, true
+		}),
+	)
+	require.NoError(t, err)
+
+	mysqlHandler := &fakeServerFirstHandler{
+		port:        3306,
+		greeting:    "mysql-server-greeting\n",
+		serverFirst: true,
+		peekLenCh:   make(chan int, 1),
+	}
+	emptyPreambleHandler := &fakeEmptyPreamblePortHandler{
+		port:      6380,
+		greeting:  "port-fallback-greeting\n",
+		peekLenCh: make(chan int, 1),
+	}
+	rt.RegisterProtocolHandler(emptyPreambleHandler)
+	rt.RegisterProtocolHandler(mysqlHandler)
+
+	require.NoError(t, rt.Start(t.Context()))
+	defer func() { _ = rt.Close() }()
+
+	start := time.Now()
+	conn1, err := net.DialTimeout("tcp4", rt.EgressAddr().String(), 2*time.Second)
+	require.NoError(t, err)
+	defer conn1.Close()
+	_ = conn1.SetDeadline(time.Now().Add(2 * time.Second))
+
+	r1 := bufio.NewReader(conn1)
+	greeting, err := r1.ReadString('\n')
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.Equal(t, "mysql-server-greeting\n", greeting)
+	assert.Less(t, elapsed, 100*time.Millisecond, "ServerFirstProtocolHandler must skip the 200ms client peek timeout")
+	assert.Equal(t, 0, <-mysqlHandler.peekLenCh)
+
+	_, err = io.WriteString(conn1, "SELECT 1\n")
+	require.NoError(t, err)
+	ack, err := r1.ReadString('\n')
+	require.NoError(t, err)
+	assert.Equal(t, "ack:SELECT 1\n", ack)
+
+	targetPort.Store(6380)
+	conn2, err := net.DialTimeout("tcp4", rt.EgressAddr().String(), 2*time.Second)
+	require.NoError(t, err)
+	defer conn2.Close()
+	_ = conn2.SetDeadline(time.Now().Add(2 * time.Second))
+
+	r2 := bufio.NewReader(conn2)
+	fallbackGreeting, err := r2.ReadString('\n')
+	require.NoError(t, err)
+	assert.Equal(t, "port-fallback-greeting\n", fallbackGreeting)
+	assert.Equal(t, 0, <-emptyPreambleHandler.peekLenCh)
 }

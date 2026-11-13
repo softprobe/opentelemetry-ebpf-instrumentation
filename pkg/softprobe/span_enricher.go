@@ -4,8 +4,10 @@
 package softprobe // import "go.opentelemetry.io/obi/pkg/softprobe"
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"maps"
 	"math"
 	"net/http"
@@ -43,15 +45,18 @@ type SpanEnricher struct {
 	cfg            Config
 	replayRegistry *ReplayRegistry
 	exchangeCache  *HTTPExchangeCache
+	logExporter    *LogExporter
 	mu             sync.Mutex
 	segments       *expirable.LRU[[16]byte, segmentEntry]
 }
 
 func NewSpanEnricher(cfg Config, replayRegistry *ReplayRegistry) *SpanEnricher {
+	normalized := cfg.WithDefaults()
 	return &SpanEnricher{
-		cfg:            cfg.WithDefaults(),
+		cfg:            normalized,
 		replayRegistry: replayRegistry,
 		exchangeCache:  SharedDataplaneBridge().ExchangeCache(),
+		logExporter:    NewLogExporter(normalized, replayRegistry),
 		segments:       expirable.NewLRU[[16]byte, segmentEntry](defaultSegmentCacheSize, nil, defaultSegmentCacheTTL),
 	}
 }
@@ -61,6 +66,25 @@ func (e *SpanEnricher) SetExchangeCache(cache *HTTPExchangeCache) {
 		return
 	}
 	e.exchangeCache = cache
+}
+
+func (e *SpanEnricher) SetLogExporter(exp *LogExporter) {
+	if e == nil {
+		return
+	}
+	if e.logExporter != nil && e.logExporter != exp {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = e.logExporter.Close(closeCtx)
+		cancel()
+	}
+	e.logExporter = exp
+}
+
+func (e *SpanEnricher) Close(ctx context.Context) error {
+	if e == nil || e.logExporter == nil {
+		return nil
+	}
+	return e.logExporter.Close(ctx)
 }
 
 func (e *SpanEnricher) AppID() string {
@@ -206,6 +230,15 @@ func (e *SpanEnricher) EnrichSpan(span *request.Span, traceID [16]byte, spanID [
 	attrs, err := BuildOTLPSpanAttributes(mocker)
 	if err != nil {
 		return EnrichResult{IsEntryPoint: isServerHTTP}
+	}
+	if e.logExporter != nil {
+		e.logExporter.Enqueue(LogRecordInput{
+			TraceID:      traceID,
+			SpanID:       spanID,
+			Source:       LogSourceAgent,
+			SeverityText: "INFO",
+			Body:         fmt.Sprintf("softprobe recorded %s %s", mocker.CategoryType.Name, mocker.OperationName),
+		})
 	}
 	return EnrichResult{
 		Mocker:       mocker,
