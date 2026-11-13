@@ -24,6 +24,9 @@ const (
 	defaultLogFlushInterval = 250 * time.Millisecond
 	defaultLogHTTPTimeout   = 5 * time.Second
 	logScopeName            = "softprobe.obi.logs"
+
+	LogSourceApp   = "app"
+	LogSourceAgent = "agent"
 )
 
 type LogRecordInput struct {
@@ -32,6 +35,8 @@ type LogRecordInput struct {
 	SpanID       [8]byte
 	Body         string
 	SeverityText string
+	Source       string
+	ReplayID     string
 	FD           int
 }
 
@@ -185,15 +190,23 @@ func (l *LogExporter) sendBatch(ctx context.Context, batch []LogRecordInput) err
 		lr.Body().SetStr(item.Body)
 
 		attrs := lr.Attributes()
-		attrs.PutStr("sp.source", "app")
+		source := strings.TrimSpace(item.Source)
+		if source == "" {
+			source = LogSourceApp
+		}
+		attrs.PutStr("sp.source", source)
 		attrs.PutStr("trace_id", FormatTraceIDHex(item.TraceID))
 		if item.SpanID != ([8]byte{}) {
 			attrs.PutStr("span_id", FormatSpanIDHex(item.SpanID))
 		}
-		if l.replayRegistry != nil {
-			if sess, ok := l.replayRegistry.Lookup(item.TraceID); ok && sess.ReplayID != "" {
-				attrs.PutStr("sp.replay_id", sess.ReplayID)
+		replayID := strings.TrimSpace(item.ReplayID)
+		if replayID == "" && l.replayRegistry != nil {
+			if sess, ok := l.replayRegistry.Lookup(item.TraceID); ok {
+				replayID = sess.ReplayID
 			}
+		}
+		if replayID != "" {
+			attrs.PutStr("sp.replay_id", replayID)
 		}
 	}
 

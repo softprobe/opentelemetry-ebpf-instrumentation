@@ -52,6 +52,12 @@ func WithRuntimeBackendClient(client *BackendClient) RuntimeOption {
 	}
 }
 
+func WithRuntimeLogExporter(exp *LogExporter) RuntimeOption {
+	return func(r *Runtime) {
+		r.logExporter = exp
+	}
+}
+
 func WithRuntimeIngressOptions(opts ...IngressOption) RuntimeOption {
 	return func(r *Runtime) {
 		r.ingressOpts = append(r.ingressOpts, opts...)
@@ -85,6 +91,7 @@ type Runtime struct {
 	replayRegistry      *ReplayRegistry
 	bridge              *DataplaneBridge
 	backendClient       *BackendClient
+	logExporter         *LogExporter
 	ingress             *IngressListener
 	httpHandler         *HTTPProtocolHandler
 	handlersMu          sync.RWMutex
@@ -134,6 +141,9 @@ func NewRuntime(cfg Config, opts ...RuntimeOption) (*Runtime, error) {
 		}
 		rt.backendClient = bc
 	}
+	if rt.logExporter == nil {
+		rt.logExporter = NewLogExporter(rt.cfg, rt.replayRegistry)
+	}
 
 	ca, err := NewEphemeralCA()
 	if err != nil {
@@ -141,8 +151,11 @@ func NewRuntime(cfg Config, opts ...RuntimeOption) (*Runtime, error) {
 	}
 	rt.ca = ca
 
-	httpOpts := make([]HTTPHandlerOption, 0, len(rt.httpOpts)+1)
+	httpOpts := make([]HTTPHandlerOption, 0, len(rt.httpOpts)+2)
 	httpOpts = append(httpOpts, WithHTTPExchangeCache(rt.bridge.ExchangeCache()))
+	if rt.logExporter != nil {
+		httpOpts = append(httpOpts, WithHTTPLogExporter(rt.logExporter))
+	}
 	httpOpts = append(httpOpts, rt.httpOpts...)
 
 	rt.httpHandler = NewHTTPProtocolHandler(
@@ -156,12 +169,17 @@ func NewRuntime(cfg Config, opts ...RuntimeOption) (*Runtime, error) {
 	rt.handlers = []OutgoingProtocolHandler{rt.httpHandler}
 
 	if rt.cfg.IngressProxyPort > 0 {
+		ingressOpts := make([]IngressOption, 0, len(rt.ingressOpts)+1)
+		if rt.logExporter != nil {
+			ingressOpts = append(ingressOpts, WithIngressLogExporter(rt.logExporter))
+		}
+		ingressOpts = append(ingressOpts, rt.ingressOpts...)
 		rt.ingress = NewIngressListener(
 			rt.cfg,
 			rt.replayRegistry,
 			rt.backendClient,
 			rt.bridge,
-			rt.ingressOpts...,
+			ingressOpts...,
 		)
 	}
 
@@ -183,6 +201,10 @@ func (r *Runtime) CA() *EphemeralCA {
 
 func (r *Runtime) HTTPHandler() *HTTPProtocolHandler {
 	return r.httpHandler
+}
+
+func (r *Runtime) LogExporter() *LogExporter {
+	return r.logExporter
 }
 
 func (r *Runtime) IngressAddr() net.Addr {
@@ -289,8 +311,15 @@ func (r *Runtime) Close() error {
 		}
 	})
 	r.wg.Wait()
-	if closeBackend && r.backendClient != nil {
-		r.backendClient.Close()
+	if closeBackend {
+		if r.logExporter != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = r.logExporter.Close(closeCtx)
+			cancel()
+		}
+		if r.backendClient != nil {
+			r.backendClient.Close()
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -389,13 +418,28 @@ func (r *Runtime) handleEgressConn(ctx context.Context, rawConn net.Conn) {
 		return
 	}
 
+	origPort := target.AddrPort.Port()
+	r.handlersMu.RLock()
+	handlers := slices.Clone(r.handlers)
+	r.handlersMu.RUnlock()
+
+	serverFirst := false
+	for _, handler := range handlers {
+		if sf, ok := handler.(ServerFirstProtocolHandler); ok && sf.IsServerFirstPort(origPort) {
+			serverFirst = true
+			break
+		}
+	}
+
 	cc := NewCountingConn(rawConn)
 	br := bufio.NewReaderSize(cc, defaultProxyBufSize)
 
 	var peek []byte
-	_ = rawConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	peek, _ = br.Peek(min(defaultProxyBufSize, 8))
-	_ = rawConn.SetReadDeadline(time.Time{})
+	if !serverFirst {
+		_ = rawConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		peek, _ = br.Peek(min(defaultProxyBufSize, 8))
+		_ = rawConn.SetReadDeadline(time.Time{})
+	}
 
 	oc := OutgoingConnectionContext{
 		ClientConn: cc,
@@ -405,12 +449,8 @@ func (r *Runtime) handleEgressConn(ctx context.Context, rawConn net.Conn) {
 		CallerPID:  target.PID,
 	}
 
-	r.handlersMu.RLock()
-	handlers := slices.Clone(r.handlers)
-	r.handlersMu.RUnlock()
-
 	for _, handler := range handlers {
-		if len(peek) > 0 && handler.CanHandle(peek, target.AddrPort.Port()) {
+		if handler.CanHandle(peek, origPort) {
 			if err := handler.HandleConnection(ctx, oc); err != nil {
 				r.log.Debug("egress protocol handler finished with error", "handler", handler.Name(), "orig_dst", target.AddrPort, "error", err)
 			}
