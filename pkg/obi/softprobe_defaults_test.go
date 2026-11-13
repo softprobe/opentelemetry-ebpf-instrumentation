@@ -54,6 +54,8 @@ func TestApplySoftprobeRuntimeDefaultsEnabled(t *testing.T) {
 	assert.Equal(t, uint32(65536), cfg.EBPF.BufferSizes.MSSQL)
 	assert.Equal(t, uint32(65536), cfg.EBPF.BufferSizes.TCP)
 	assert.Equal(t, 524288, cfg.EBPF.SoftprobeCaptureMaxBytes)
+	assert.Equal(t, softprobe.DefaultIngressProxyPort, cfg.Softprobe.IngressProxyPort)
+	assert.Equal(t, softprobe.DefaultEgressProxyPort, cfg.Softprobe.EgressProxyPort)
 	assert.True(t, cfg.EBPF.TrackRequestHeaders)
 	assert.True(t, cfg.EBPF.PopulateTraceContext)
 	assert.Equal(t, config.ContextPropagationHeaders, cfg.EBPF.ContextPropagation)
@@ -71,10 +73,12 @@ func TestApplySoftprobeRuntimeDefaultsPreservesExplicitBufferSizes(t *testing.T)
 	cfg.EBPF.BufferSizes.Postgres = 8192
 	cfg.EBPF.ContextPropagation = config.ContextPropagationAll
 	cfg.Softprobe = softprobe.Config{
-		Enabled:      true,
-		AppID:        "travel-ota",
-		BackendURL:   "http://sp-app:8090",
-		MaxBodyBytes: 131072,
+		Enabled:          true,
+		AppID:            "travel-ota",
+		BackendURL:       "http://sp-app:8090",
+		IngressProxyPort: 15006,
+		EgressProxyPort:  15001,
+		MaxBodyBytes:     131072,
 	}
 
 	cfg.ApplySoftprobeRuntimeDefaults()
@@ -83,6 +87,8 @@ func TestApplySoftprobeRuntimeDefaultsPreservesExplicitBufferSizes(t *testing.T)
 	assert.Equal(t, "http://custom-otel:4318/v1/traces", cfg.Traces.TracesEndpoint)
 	assert.Equal(t, uint32(16384), cfg.EBPF.BufferSizes.HTTP)
 	assert.Equal(t, uint32(8192), cfg.EBPF.BufferSizes.Postgres)
+	assert.Equal(t, 15006, cfg.Softprobe.IngressProxyPort)
+	assert.Equal(t, 15001, cfg.Softprobe.EgressProxyPort)
 	assert.Equal(t, config.ContextPropagationAll, cfg.EBPF.ContextPropagation)
 	assert.False(t, cfg.EBPF.LogEnricher.Enabled())
 }
