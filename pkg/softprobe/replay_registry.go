@@ -22,6 +22,14 @@ const (
 	defaultPerSocketRingBound = 64
 )
 
+var sharedReplayRegistry = sync.OnceValue(func() *ReplayRegistry {
+	return NewReplayRegistry(0, 0)
+})
+
+func SharedReplayRegistry() *ReplayRegistry {
+	return sharedReplayRegistry()
+}
+
 type ReplaySession struct {
 	TraceID            [16]byte
 	Mode               TrafficMode

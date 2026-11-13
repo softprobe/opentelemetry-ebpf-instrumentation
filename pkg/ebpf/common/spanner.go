@@ -98,7 +98,7 @@ func HTTPRequestTraceToSpan(parseCtx *EBPFParseContext, trace *HTTPRequestTrace)
 		SubType:   subType,
 	}
 
-	if parseCtx != nil && parseCtx.payloadExtraction.Enabled() && (!span.IsClientSpan() || !parseCtx.defersGoHTTPClientRequests()) {
+	if parseCtx != nil && (parseCtx.payloadExtraction.Enabled() || parseCtx.softprobeEnabled()) && (!span.IsClientSpan() || !parseCtx.defersGoHTTPClientRequests()) {
 		span = enrichedGoHTTPSpan(parseCtx, trace.Conn, &span)
 	}
 
@@ -116,7 +116,8 @@ func enrichedGoHTTPSpan(parseCtx *EBPFParseContext, conn BpfConnectionInfoT, spa
 			b, ok = extractTCPLargeBuffer(parseCtx, [16]byte{}, [8]byte{}, packetTypeResponse, directionByPacketType(packetTypeResponse, span.IsClientSpan()), conn, ProtocolTypeHTTP)
 		}
 		if ok {
-			if looksLikeHTTP1Response(b) {
+			switch {
+			case looksLikeHTTP1Response(b):
 				var err error
 				resp, err = httpSafeParseResponse(b, req)
 				if err != nil {
@@ -124,7 +125,12 @@ func enrichedGoHTTPSpan(parseCtx *EBPFParseContext, conn BpfConnectionInfoT, spa
 				} else {
 					hasResponse = true
 				}
-			} else {
+			case parseCtx.softprobeEnabled():
+				if r2, ok := parseHTTP2ResponseForSoftprobe(b, req, span); ok {
+					resp = r2
+					hasResponse = true
+				}
+			default:
 				r2, ok := parseHTTP2Response(b, req, span)
 
 				if ok {
@@ -135,6 +141,13 @@ func enrichedGoHTTPSpan(parseCtx *EBPFParseContext, conn BpfConnectionInfoT, spa
 		}
 
 		if !hasResponse || req == nil || resp == nil {
+			if req != nil && parseCtx.softprobeEnabled() {
+				defer req.Body.Close()
+				if req.ContentLength > 0 {
+					recoverRequestBody(req, requestBuffer)
+				}
+				captureSoftprobeHTTP(parseCtx.softprobeMaxBodyBytes, span, req, nil)
+			}
 			return *span
 		}
 
@@ -193,7 +206,11 @@ func parseGoRequestLargeBuffer(
 		return req, buffer, true
 	}
 
-	if req, ok := parseHTTP2Request(buffer, span); ok {
+	if parseCtx.softprobeEnabled() {
+		if req, ok := parseHTTP2RequestForSoftprobe(buffer, span); ok {
+			return req, buffer, true
+		}
+	} else if req, ok := parseHTTP2Request(buffer, span); ok {
 		return req, buffer, true
 	}
 
@@ -215,7 +232,7 @@ func (ctx *EBPFParseContext) goClientPayloadExtractionEnabled(cfg *config.EBPFTr
 		cfg.BufferSizes.HTTP > 0 &&
 		cfg.GoHTTPClientBufferTimeout > 0 &&
 		cfg.MaxTransactionTime > 0 &&
-		cfg.PayloadExtraction.HTTP.ClientEnabled()
+		(cfg.PayloadExtraction.HTTP.ClientEnabled() || cfg.SoftprobeCaptureMaxBytes > 0)
 }
 
 func (ctx *EBPFParseContext) defersGoHTTPClientRequests() bool {

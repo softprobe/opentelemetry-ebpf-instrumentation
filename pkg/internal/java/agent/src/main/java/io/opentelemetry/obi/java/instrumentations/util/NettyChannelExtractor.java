@@ -45,4 +45,36 @@ public class NettyChannelExtractor {
 
     return c;
   }
+
+  @SuppressWarnings("unused")
+  public static Connection extractConnectionFromIOSession(Object session) {
+    Connection c = null;
+    try {
+      Method localAddressMethod = session.getClass().getMethod("getLocalAddress");
+      localAddressMethod.setAccessible(true);
+      Object localObj = localAddressMethod.invoke(session);
+
+      Method remoteAddressMethod = session.getClass().getMethod("getRemoteAddress");
+      remoteAddressMethod.setAccessible(true);
+      Object remoteObj = remoteAddressMethod.invoke(session);
+
+      if (localObj instanceof InetSocketAddress && remoteObj instanceof InetSocketAddress) {
+        InetSocketAddress localAddress = (InetSocketAddress) localObj;
+        InetSocketAddress remoteAddress = (InetSocketAddress) remoteObj;
+        if (localAddress.getAddress() != null && remoteAddress.getAddress() != null) {
+          c =
+              new Connection(
+                  localAddress.getAddress(),
+                  localAddress.getPort(),
+                  remoteAddress.getAddress(),
+                  remoteAddress.getPort());
+        }
+      }
+    } catch (Exception x) {
+      if (SSLStorage.debugOn) {
+        System.err.println("[NettyChannelExtractor] Failed to extract IOSession data " + x);
+      }
+    }
+    return c;
+  }
 }

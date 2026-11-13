@@ -1621,6 +1621,21 @@ type Span struct {
 	CudaDeviceIndex uint32 `json:"-"`
 	CudaDeviceUUID  string `json:"-"`
 	CudaDeviceModel string `json:"-"`
+
+	Softprobe *SoftprobeCapture `json:"-"`
+}
+
+type SoftprobeCapture struct {
+	RequestHeaders  map[string][]string
+	ResponseHeaders map[string][]string
+	RequestBody     []byte
+	ResponseBody    []byte
+	RawQuery        string
+	StatusReason    string
+	SQLWireRequest  []byte
+	SQLWireResponse []byte
+	RedisWireReq    []byte
+	RedisWireResp   []byte
 }
 
 func (s *Span) Inside(parent *Span) bool {

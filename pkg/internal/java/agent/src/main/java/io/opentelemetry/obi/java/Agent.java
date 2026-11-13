@@ -146,40 +146,54 @@ public class Agent {
       if (Agent.debugOn) {
         setupInstrumentationsDebugging();
       }
+      if (optEnabled(opts, "preferHttp1Alpn")) {
+        setupPreferHttp1Alpn();
+      }
     } catch (Exception x) {
       System.err.println("Failed to load agent");
       x.printStackTrace(System.err);
       return;
     }
 
-    builder(opts, inst)
-        .type(ClassLoaderInst.type())
-        .transform(ClassLoaderInst.transformer())
-        .type(SSLSocketInst.type())
-        .transform(SSLSocketInst.transformer())
-        .type(SSLSocketStreamInst.inputStreamType())
-        .transform(SSLSocketStreamInst.inputStreamTransformer())
-        .type(SSLSocketStreamInst.outputStreamType())
-        .transform(SSLSocketStreamInst.outputStreamTransformer())
-        .type(SSLEngineInst.type())
-        .transform(SSLEngineInst.transformer())
-        .type(SocketChannelInst.type())
-        .transform(SocketChannelInst.transformer())
-        .type(NettySSLHandlerInst.type())
-        .transform(NettySSLHandlerInst.transformer())
-        .type(JavaExecutorInst.type())
-        .transform(JavaExecutorInst.transformer())
-        .type(JdkHttpClientInst.type())
-        .transform(JdkHttpClientInst.transformer(optEnabled(opts, "httpHeaders")))
-        .type(CallableInst.type())
-        .transform(CallableInst.transformer())
-        .type(RunnableInst.type())
-        .transform(RunnableInst.transformer())
-        .type(JavaForkJoinTaskInst.type())
-        .transform(JavaForkJoinTaskInst.transformer())
-        .type(VirtualThreadInst.type())
-        .transform(VirtualThreadInst.transformer())
-        .installOn(inst);
+    AgentBuilder agentBuilder =
+        builder(opts, inst)
+            .type(ClassLoaderInst.type())
+            .transform(ClassLoaderInst.transformer())
+            .type(SSLSocketInst.type())
+            .transform(SSLSocketInst.transformer())
+            .type(SSLSocketStreamInst.inputStreamType())
+            .transform(SSLSocketStreamInst.inputStreamTransformer())
+            .type(SSLSocketStreamInst.outputStreamType())
+            .transform(SSLSocketStreamInst.outputStreamTransformer())
+            .type(SSLEngineInst.type())
+            .transform(SSLEngineInst.transformer())
+            .type(SocketChannelInst.type())
+            .transform(SocketChannelInst.transformer())
+            .type(NettySSLHandlerInst.type())
+            .transform(NettySSLHandlerInst.transformer())
+            .type(ApacheHttpAsyncClientInst.type())
+            .transform(ApacheHttpAsyncClientInst.transformer())
+            .type(ReactorNettyHttpClientInst.type())
+            .transform(ReactorNettyHttpClientInst.transformer())
+            .type(JavaExecutorInst.type())
+            .transform(JavaExecutorInst.transformer())
+            .type(JdkHttpClientInst.type())
+            .transform(JdkHttpClientInst.transformer(optEnabled(opts, "httpHeaders")))
+            .type(CallableInst.type())
+            .transform(CallableInst.transformer())
+            .type(RunnableInst.type())
+            .transform(RunnableInst.transformer())
+            .type(JavaForkJoinTaskInst.type())
+            .transform(JavaForkJoinTaskInst.transformer())
+            .type(VirtualThreadInst.type())
+            .transform(VirtualThreadInst.transformer());
+    if (optEnabled(opts, "preferHttp1Alpn")) {
+      agentBuilder =
+          agentBuilder
+              .type(SSLAlpnPreferenceInst.type())
+              .transform(SSLAlpnPreferenceInst.transformer());
+    }
+    agentBuilder.installOn(inst);
 
     if (optEnabled(opts, "runtimeMetrics")) {
       try {
@@ -223,6 +237,9 @@ public class Agent {
           || RunnableInst.matches(clazz)
           || JavaForkJoinTaskInst.matches(clazz)
           || NettySSLHandlerInst.matches(clazz)
+          || ApacheHttpAsyncClientInst.matches(clazz)
+          || ReactorNettyHttpClientInst.matches(clazz)
+          || SSLAlpnPreferenceInst.matches(clazz)
           || VirtualThreadInst.matches(clazz)) {
         if (Agent.debugOn) {
           System.err.println("Retransforming " + clazz);
@@ -413,6 +430,20 @@ public class Agent {
     } catch (Exception x) {
       System.err.println("Failed to setup instrumentation debugging");
       x.printStackTrace(System.err);
+    }
+  }
+
+  private static void setupPreferHttp1Alpn() {
+    SSLStorage.preferHttp1Alpn = true;
+    try {
+      Class<?> sslStorageClass =
+          Class.forName("io.opentelemetry.obi.java.instrumentations.data.SSLStorage", true, null);
+      Field preferField = sslStorageClass.getDeclaredField("preferHttp1Alpn");
+      preferField.set(null, true);
+    } catch (Exception x) {
+      if (Agent.debugOn) {
+        System.err.println("Failed to setup HTTP/1.1 ALPN preference: " + x);
+      }
     }
   }
 }
