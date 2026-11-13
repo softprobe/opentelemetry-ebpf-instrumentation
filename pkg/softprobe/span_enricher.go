@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -139,6 +140,9 @@ func (e *SpanEnricher) EnrichSpan(span *request.Span, traceID [16]byte, spanID [
 
 	isServerHTTP := isServerHTTPSpan(span)
 	if isServerHTTP {
+		if isInternalInspectorSpan(span) {
+			return EnrichResult{}
+		}
 		e.ObserveServerSpan(span, traceID, spanID)
 		if span.Softprobe != nil && len(span.Softprobe.RequestHeaders) > 0 {
 			canonicalReqHeaders := canonicalizeHeaderMultiMap(span.Softprobe.RequestHeaders)
@@ -217,9 +221,9 @@ func (e *SpanEnricher) EnrichSpan(span *request.Span, traceID [16]byte, spanID [
 	case span.Type == request.EventTypeHTTPClient || (span.Type == request.EventTypeHTTP && span.IsClientSpan()):
 		mocker, err = e.buildHTTPClientMocker(traceID, meta, span)
 	case span.Type == request.EventTypeSQLClient:
-		mocker, err = e.buildDatabaseMocker(meta, span)
+		mocker, err = e.buildDatabaseMocker(traceID, meta, span)
 	case span.Type == request.EventTypeRedisClient:
-		mocker, err = e.buildRedisMocker(meta, span)
+		mocker, err = e.buildRedisMocker(traceID, meta, span)
 	default:
 		return EnrichResult{}
 	}
@@ -524,25 +528,78 @@ func stripDecodedHeaderTuples(in []HeaderTuple, decodedLen int) []HeaderTuple {
 	return out
 }
 
-func (e *SpanEnricher) buildDatabaseMocker(meta SpanMetadata, span *request.Span) (*SpMocker, error) {
-	dbName := span.DBNamespace
-	if dbName == "" {
-		dbName = "default"
+func spanClientPort(span *request.Span, egressProxyPort int) uint16 {
+	if span == nil {
+		return 0
 	}
+	if egressProxyPort <= 0 {
+		egressProxyPort = DefaultEgressProxyPort
+	}
+	if span.HostPort == egressProxyPort && span.PeerPort > 0 && span.PeerPort <= 65535 && span.PeerPort != egressProxyPort {
+		return uint16(span.PeerPort)
+	}
+	if span.PeerPort == egressProxyPort && span.HostPort > 0 && span.HostPort <= 65535 && span.HostPort != egressProxyPort {
+		return uint16(span.HostPort)
+	}
+	return 0
+}
+
+func isNonExecutionSQLCommand(cmd string) bool {
+	switch strings.ToUpper(strings.TrimSpace(cmd)) {
+	case "STMT_PREPARE", "STMT_CLOSE", "STMT_RESET", "PING", "INIT_DB", "QUIT":
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *SpanEnricher) buildDatabaseMocker(traceID [16]byte, meta SpanMetadata, span *request.Span) (*SpMocker, error) {
+	if isNonExecutionSQLCommand(span.SQLCommand) {
+		return nil, nil
+	}
+	if span.Softprobe != nil {
+		if isNonExecutionSQLWireRequest(span.Softprobe.SQLWireRequest) || isMySQLPrepareOKWireResponse(span.Softprobe.SQLWireResponse) {
+			return nil, nil
+		}
+	}
+	dbName := span.DBNamespace
 	sqlText := span.Statement
 	if sqlText == "" {
 		sqlText = span.Path
+	}
+	if sqlText != "" && isSessionControlSQL(sqlText) {
+		return nil, nil
 	}
 
 	var (
 		params []any
 		result *DatabaseResult
 	)
+	if e.exchangeCache != nil {
+		clientPort := spanClientPort(span, e.cfg.EgressProxyPort)
+		if captured, ok := e.exchangeCache.ConsumeDatabaseForConn(traceID, clientPort, span.Statement, span.Method, span.Path); ok {
+			if captured.DBName != "" {
+				dbName = captured.DBName
+			}
+			if captured.SQL != "" {
+				sqlText = captured.SQL
+			}
+			params = captured.Parameters
+			result = captured.Result
+		}
+	}
+	if isSessionControlSQL(sqlText) {
+		return nil, nil
+	}
+	if dbName == "" {
+		dbName = "default"
+	}
+
 	if span.Softprobe != nil {
-		if len(span.Softprobe.SQLWireRequest) > 0 {
+		if len(params) == 0 && len(span.Softprobe.SQLWireRequest) > 0 {
 			params = ParsePostgresWireRequestParams(span.Softprobe.SQLWireRequest)
 		}
-		if len(span.Softprobe.SQLWireResponse) > 0 {
+		if result == nil && len(span.Softprobe.SQLWireResponse) > 0 {
 			switch request.SQLKind(span.SubType) {
 			case request.DBMySQL:
 				result = ParseMySQLWireResponse(span.Softprobe.SQLWireResponse)
@@ -573,28 +630,55 @@ func (e *SpanEnricher) buildDatabaseMocker(meta SpanMetadata, span *request.Span
 	})
 }
 
-func (e *SpanEnricher) buildRedisMocker(meta SpanMetadata, span *request.Span) (*SpMocker, error) {
+func (e *SpanEnricher) buildRedisMocker(traceID [16]byte, meta SpanMetadata, span *request.Span) (*SpMocker, error) {
 	var wireReq, wireResp []byte
 	if span.Softprobe != nil {
 		wireReq = span.Softprobe.RedisWireReq
 		wireResp = span.Softprobe.RedisWireResp
 	}
 	cmd, keys, fields := ParseRedisWireCommandArgs(wireReq, span.Method, span.Path)
-	if cmd == "" {
+	if isRedisSessionCommand(cmd) {
 		return nil, nil
 	}
 
-	var reply *RedisReply
-	if len(wireResp) > 0 {
+	var (
+		reply       *RedisReply
+		clusterName string
+	)
+	clientPort := spanClientPort(span, e.cfg.EgressProxyPort)
+	if e.exchangeCache != nil {
+		if captured, ok := e.exchangeCache.ConsumeRedisForConn(traceID, clientPort, cmd, keys); ok {
+			if captured.ClusterName != "" {
+				clusterName = captured.ClusterName
+			}
+			if len(captured.Keys) > 0 {
+				keys = captured.Keys
+			}
+			if len(captured.Fields) > 0 {
+				fields = captured.Fields
+			}
+			if captured.Reply != nil {
+				reply = captured.Reply
+			}
+		}
+	}
+	if reply == nil && len(wireResp) > 0 {
 		reply = ParseRedisWireReply(wireResp)
 	}
 	if reply == nil && span.DBError.Description != "" {
 		reply = &RedisReply{Type: "-", Str: span.DBError.Description}
 	}
 
-	clusterName := span.Host
-	if clusterName != "" && span.HostPort > 0 {
-		clusterName = clusterName + ":" + strconv.Itoa(span.HostPort)
+	if clusterName == "" && clientPort != 0 {
+		if target, ok := SharedDataplaneBridge().LookupEgressTarget(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(clientPort)}); ok && target.AddrPort.IsValid() {
+			clusterName = target.AddrPort.String()
+		}
+	}
+	if clusterName == "" && span.Host != "" && (e.cfg.EgressProxyPort == 0 || span.HostPort != e.cfg.EgressProxyPort) {
+		clusterName = span.Host
+		if span.HostPort > 0 {
+			clusterName = clusterName + ":" + strconv.Itoa(span.HostPort)
+		}
 	}
 	if clusterName == "" {
 		clusterName = "default"
@@ -608,6 +692,16 @@ func (e *SpanEnricher) buildRedisMocker(meta SpanMetadata, span *request.Span) (
 		Reply:       reply,
 		OrderFree:   true,
 	})
+}
+
+func isInternalInspectorSpan(span *request.Span) bool {
+	if span == nil || span.HostPort != 9229 {
+		return false
+	}
+	if span.Status == http.StatusSwitchingProtocols {
+		return true
+	}
+	return strings.HasPrefix(span.Path, "/json")
 }
 
 func recordEnvironmentCode(env string) int {

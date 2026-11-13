@@ -5,14 +5,19 @@ package softprobe // import "go.opentelemetry.io/obi/pkg/softprobe"
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -70,6 +75,24 @@ func WithRuntimeHTTPHandlerOptions(opts ...HTTPHandlerOption) RuntimeOption {
 	}
 }
 
+func WithRuntimePostgresHandlerOptions(opts ...PostgresHandlerOption) RuntimeOption {
+	return func(r *Runtime) {
+		r.postgresOpts = append(r.postgresOpts, opts...)
+	}
+}
+
+func WithRuntimeMySQLHandlerOptions(opts ...MySQLHandlerOption) RuntimeOption {
+	return func(r *Runtime) {
+		r.mysqlOpts = append(r.mysqlOpts, opts...)
+	}
+}
+
+func WithRuntimeRedisHandlerOptions(opts ...RedisHandlerOption) RuntimeOption {
+	return func(r *Runtime) {
+		r.redisOpts = append(r.redisOpts, opts...)
+	}
+}
+
 func WithRuntimeHeartbeatInterval(d time.Duration) RuntimeOption {
 	return func(r *Runtime) {
 		if d > 0 {
@@ -94,10 +117,16 @@ type Runtime struct {
 	logExporter         *LogExporter
 	ingress             *IngressListener
 	httpHandler         *HTTPProtocolHandler
+	postgresHandler     *PostgresProtocolHandler
+	mysqlHandler        *MySQLProtocolHandler
+	redisHandler        *RedisProtocolHandler
 	handlersMu          sync.RWMutex
 	handlers            []OutgoingProtocolHandler
 	ingressOpts         []IngressOption
 	httpOpts            []HTTPHandlerOption
+	postgresOpts        []PostgresHandlerOption
+	mysqlOpts           []MySQLHandlerOption
+	redisOpts           []RedisHandlerOption
 	resolveEgressTarget func(remoteAddr net.Addr) (EgressTarget, bool)
 	heartbeatInterval   time.Duration
 	dialRaw             func(ctx context.Context, network, address string) (net.Conn, error)
@@ -166,7 +195,55 @@ func NewRuntime(cfg Config, opts ...RuntimeOption) (*Runtime, error) {
 		rt.backendClient,
 		httpOpts...,
 	)
-	rt.handlers = []OutgoingProtocolHandler{rt.httpHandler}
+
+	postgresOpts := make([]PostgresHandlerOption, 0, len(rt.postgresOpts)+2)
+	postgresOpts = append(postgresOpts, WithPostgresExchangeCache(rt.bridge.ExchangeCache()))
+	if rt.logExporter != nil {
+		postgresOpts = append(postgresOpts, WithPostgresLogExporter(rt.logExporter))
+	}
+	postgresOpts = append(postgresOpts, rt.postgresOpts...)
+	rt.postgresHandler = NewPostgresProtocolHandler(
+		rt.cfg,
+		rt.replayRegistry,
+		rt.bridge.WriteTracker(),
+		rt.backendClient,
+		postgresOpts...,
+	)
+
+	mysqlOpts := make([]MySQLHandlerOption, 0, len(rt.mysqlOpts)+2)
+	mysqlOpts = append(mysqlOpts, WithMySQLExchangeCache(rt.bridge.ExchangeCache()))
+	if rt.logExporter != nil {
+		mysqlOpts = append(mysqlOpts, WithMySQLLogExporter(rt.logExporter))
+	}
+	mysqlOpts = append(mysqlOpts, rt.mysqlOpts...)
+	rt.mysqlHandler = NewMySQLProtocolHandler(
+		rt.cfg,
+		rt.replayRegistry,
+		rt.bridge.WriteTracker(),
+		rt.backendClient,
+		mysqlOpts...,
+	)
+
+	redisOpts := make([]RedisHandlerOption, 0, len(rt.redisOpts)+2)
+	redisOpts = append(redisOpts, WithRedisExchangeCache(rt.bridge.ExchangeCache()))
+	if rt.logExporter != nil {
+		redisOpts = append(redisOpts, WithRedisLogExporter(rt.logExporter))
+	}
+	redisOpts = append(redisOpts, rt.redisOpts...)
+	rt.redisHandler = NewRedisProtocolHandler(
+		rt.cfg,
+		rt.replayRegistry,
+		rt.bridge.WriteTracker(),
+		rt.backendClient,
+		redisOpts...,
+	)
+
+	rt.handlers = []OutgoingProtocolHandler{
+		rt.mysqlHandler,
+		rt.postgresHandler,
+		rt.redisHandler,
+		rt.httpHandler,
+	}
 
 	if rt.cfg.IngressProxyPort > 0 {
 		ingressOpts := make([]IngressOption, 0, len(rt.ingressOpts)+1)
@@ -201,6 +278,18 @@ func (r *Runtime) CA() *EphemeralCA {
 
 func (r *Runtime) HTTPHandler() *HTTPProtocolHandler {
 	return r.httpHandler
+}
+
+func (r *Runtime) PostgresHandler() *PostgresProtocolHandler {
+	return r.postgresHandler
+}
+
+func (r *Runtime) MySQLHandler() *MySQLProtocolHandler {
+	return r.mysqlHandler
+}
+
+func (r *Runtime) RedisHandler() *RedisProtocolHandler {
+	return r.redisHandler
 }
 
 func (r *Runtime) LogExporter() *LogExporter {
@@ -483,6 +572,7 @@ func (r *Runtime) heartbeatLoop(ctx context.Context) {
 		}
 	}
 
+	r.bootstrapAgentLoad(host)
 	send("START")
 	ticker := time.NewTicker(r.heartbeatInterval)
 	defer ticker.Stop()
@@ -499,4 +589,36 @@ func (r *Runtime) heartbeatLoop(ctx context.Context) {
 			send("WORKING")
 		}
 	}
+}
+
+func (r *Runtime) bootstrapAgentLoad(host string) {
+	baseURL := strings.TrimRight(strings.TrimSpace(r.cfg.BackendURL), "/")
+	appID := strings.TrimSpace(r.cfg.AppID)
+	if baseURL == "" || appID == "" {
+		return
+	}
+	payload, err := json.Marshal(map[string]any{
+		"appId":         appID,
+		"host":          host,
+		"recordVersion": defaultRecordVersion,
+		"agentStatus":   "WORKING",
+		"status":        1,
+	})
+	if err != nil {
+		return
+	}
+	loadCtx, cancel := context.WithTimeout(context.Background(), defaultHeartbeatTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(loadCtx, http.MethodPost, baseURL+"/api/config/agent/load", bytes.NewReader(payload))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		r.log.Debug("failed bootstrapping softprobe agent config", "error", err)
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
 }
