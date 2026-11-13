@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/internal/ebpf/gotracer"
 	"go.opentelemetry.io/obi/pkg/internal/ebpf/gpuevent"
 	"go.opentelemetry.io/obi/pkg/internal/ebpf/logenricher"
+	"go.opentelemetry.io/obi/pkg/internal/ebpf/softprobetracer"
 	"go.opentelemetry.io/obi/pkg/internal/ebpf/tpinjector"
 	msgh "go.opentelemetry.io/obi/pkg/internal/helpers/msg"
 	"go.opentelemetry.io/obi/pkg/obi"
@@ -225,6 +226,12 @@ func newCommonTracersGroup(cfg *obi.Config, metrics imetrics.Reporter, pidFilter
 	// Enables GPU tracer
 	if cfg.EBPF.CudaInstrumentationEnabled() {
 		tracers = append(tracers, gpuevent.New(pidFilter, cfg, metrics))
+	}
+
+	if cfg.Softprobe.Enabled {
+		if spTracer := softprobetracer.New(cfg, metrics, pidFilter); spTracer != nil {
+			tracers = append(tracers, spTracer)
+		}
 	}
 
 	return tracers
