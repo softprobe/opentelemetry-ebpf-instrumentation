@@ -58,6 +58,9 @@ func (c *Config) ApplySoftprobeRuntimeDefaults() {
 	if len(c.Discovery.DefaultExcludeInstrument) == 0 {
 		c.Discovery.DefaultExcludeInstrument = slices.Clone(DefaultConfig.Discovery.DefaultExcludeInstrument)
 	}
+	// Upstream OBI stops tpinjector header propagation and span export when a target
+	// process exports OTLP traces. Softprobe record and replay require both to stay active.
+	c.Discovery.ExcludeOTelInstrumentedServices = false
 
 	if c.EBPF.BufferSizes.HTTP == 0 {
 		httpBytes := uint32(min(c.Softprobe.MaxBodyBytes, int(softprobeMaxHTTPBufferBytes)))

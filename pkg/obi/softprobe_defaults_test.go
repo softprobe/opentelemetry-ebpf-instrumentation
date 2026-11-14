@@ -48,6 +48,7 @@ func TestApplySoftprobeRuntimeDefaultsEnabled(t *testing.T) {
 	assert.Equal(t, 250*time.Millisecond, cfg.Traces.BatchTimeout)
 	assert.Equal(t, 250*time.Millisecond, cfg.EBPF.BatchTimeout)
 	assert.NotEmpty(t, cfg.Discovery.DefaultExcludeInstrument)
+	assert.False(t, cfg.Discovery.ExcludeOTelInstrumentedServices)
 	assert.Equal(t, uint32(262144), cfg.EBPF.BufferSizes.HTTP)
 	assert.Equal(t, uint32(65536), cfg.EBPF.BufferSizes.Postgres)
 	assert.Equal(t, uint32(65536), cfg.EBPF.BufferSizes.MySQL)

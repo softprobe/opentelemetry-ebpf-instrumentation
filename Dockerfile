@@ -48,7 +48,8 @@ COPY --from=jni-builder /build/target/classes/native/linux-amd64/libobijni.so ag
 COPY --from=jni-builder /build/target/classes/native/linux-aarch64/libobijni.so agent/target/classes/native/linux-aarch64/libobijni.so
 
 # Build the project (skip native lib compilation, already done above)
-RUN gradle build -x buildNativeLib-amd64 -x buildNativeLib-aarch64 --no-daemon
+RUN --mount=type=cache,target=/root/.gradle \
+    gradle assemble -x buildNativeLib-amd64 -x buildNativeLib-aarch64 --no-daemon
 
 # Build the autoinstrumenter binary
 FROM ghcr.io/open-telemetry/obi-generator:${TAG} AS builder
@@ -79,13 +80,22 @@ COPY --from=javaagent-builder /build/build/obi-java-agent.jar /src/pkg/internal/
 # Build
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
-	BPF_TARGETS=$TARGETARCH /generate.sh \
+	PATH="/usr/lib/llvm22/bin:$PATH" \
+	BPF2GO=/go/bin/bpf2go \
+	BPF_CLANG=clang-22 \
+	BPF_CFLAGS="-O2 -g -Wall -Werror" \
+	BPF_TARGETS=$TARGETARCH \
+	GOCACHE=/root/.cache/go-build \
+	make generate \
 	&& make compile RELEASE_VERSION=${RELEASE_VERSION} RELEASE_REVISION=${RELEASE_REVISION}
 
 # Create final image from minimal + built binary
 FROM scratch
 
-LABEL maintainer="The OpenTelemetry Authors"
+ARG SP_OBI_REV=unknown
+
+LABEL maintainer="The OpenTelemetry Authors" \
+      io.softprobe.obi.rev="${SP_OBI_REV}"
 
 WORKDIR /
 

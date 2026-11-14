@@ -206,7 +206,10 @@ static __always_inline bool sp_is_ipv6_loopback(const __be32 ip6[4]) {
 }
 
 static __always_inline void sp_sock_addr_read_ip6(const struct bpf_sock_addr *ctx, __be32 ip6[4]) {
-    u32 w0, w1, w2, w3;
+    u32 w0 = 0;
+    u32 w1 = 0;
+    u32 w2 = 0;
+    u32 w3 = 0;
     asm volatile("%[w0] = *(u32 *)(%[base] + %[o0])\n\t"
                  "%[w1] = *(u32 *)(%[base] + %[o1])\n\t"
                  "%[w2] = *(u32 *)(%[base] + %[o2])\n\t"
@@ -545,7 +548,9 @@ int BPF_KPROBE_GUARDED(sp_kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *ms
         }
     }
 
-    const u64 byte_offset = __sync_fetch_and_add(off_ptr, (u64)size);
+    // BPF ISA v1 lacks value-returning XADD. Split read and void XADD assumes one active writer per client socket.
+    const u64 byte_offset = *off_ptr;
+    __sync_fetch_and_add(off_ptr, (u64)size);
 
     sp_write_ctx_event_t *ev =
         bpf_ringbuf_reserve(&sp_write_ctx_events, sizeof(sp_write_ctx_event_t), 0);

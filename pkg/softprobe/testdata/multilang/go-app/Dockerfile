@@ -5,7 +5,7 @@ COPY go.mod /src/go.mod
 COPY main.go /src/main.go
 RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -o /out/multilang-go .
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 COPY --from=builder /out/multilang-go /usr/local/bin/multilang-go
 EXPOSE 8083
 ENTRYPOINT ["/usr/local/bin/multilang-go"]
