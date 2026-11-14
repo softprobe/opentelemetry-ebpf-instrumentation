@@ -538,6 +538,11 @@ java-clean:
 .PHONY: java-verify
 java-verify: java-spotless-check java-test java-build
 
+.PHONY: verify-java-http
+verify-java-http:
+	@echo "### Verifying OBI Java HTTP/HTTPS 400 capture in real JVM"
+	bash scripts/verify-java-http.sh
+
 # image-build is only used for local development. GH actions that build and publish the image don't make use of it
 .PHONY: image-build
 image-build:
