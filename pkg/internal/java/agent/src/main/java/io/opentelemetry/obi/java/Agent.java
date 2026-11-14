@@ -15,6 +15,7 @@ import io.opentelemetry.obi.java.instrumentations.data.Connection;
 import io.opentelemetry.obi.java.instrumentations.data.JdkHttpClientPropagation;
 import io.opentelemetry.obi.java.instrumentations.data.JdkHttpClientTask;
 import io.opentelemetry.obi.java.instrumentations.data.SSLStorage;
+import io.opentelemetry.obi.java.instrumentations.data.SoftprobeTrustBridge;
 import io.opentelemetry.obi.java.instrumentations.util.ByteBufferExtractor;
 import io.opentelemetry.obi.java.instrumentations.util.CappedConcurrentHashMap;
 import io.opentelemetry.obi.java.instrumentations.util.NettyChannelExtractor;
@@ -90,7 +91,7 @@ public class Agent {
     if (agentArgs != null && !agentArgs.isEmpty()) {
       String[] options = agentArgs.split(",");
       for (String option : options) {
-        String[] keyValue = option.split("=");
+        String[] keyValue = option.split("=", 2);
         if (keyValue.length == 2) {
           opts.put(keyValue[0], keyValue[1]);
         }
@@ -146,40 +147,62 @@ public class Agent {
       if (Agent.debugOn) {
         setupInstrumentationsDebugging();
       }
+      if (optEnabled(opts, "preferHttp1Alpn")) {
+        setupPreferHttp1Alpn();
+      }
+      String softprobeCaPath = opts.getOrDefault("softprobeCaPath", "");
+      if (!softprobeCaPath.isEmpty()) {
+        setupSoftprobeCaTrust(softprobeCaPath);
+      }
     } catch (Exception x) {
       System.err.println("Failed to load agent");
       x.printStackTrace(System.err);
       return;
     }
 
-    builder(opts, inst)
-        .type(ClassLoaderInst.type())
-        .transform(ClassLoaderInst.transformer())
-        .type(SSLSocketInst.type())
-        .transform(SSLSocketInst.transformer())
-        .type(SSLSocketStreamInst.inputStreamType())
-        .transform(SSLSocketStreamInst.inputStreamTransformer())
-        .type(SSLSocketStreamInst.outputStreamType())
-        .transform(SSLSocketStreamInst.outputStreamTransformer())
-        .type(SSLEngineInst.type())
-        .transform(SSLEngineInst.transformer())
-        .type(SocketChannelInst.type())
-        .transform(SocketChannelInst.transformer())
-        .type(NettySSLHandlerInst.type())
-        .transform(NettySSLHandlerInst.transformer())
-        .type(JavaExecutorInst.type())
-        .transform(JavaExecutorInst.transformer())
-        .type(JdkHttpClientInst.type())
-        .transform(JdkHttpClientInst.transformer(optEnabled(opts, "httpHeaders")))
-        .type(CallableInst.type())
-        .transform(CallableInst.transformer())
-        .type(RunnableInst.type())
-        .transform(RunnableInst.transformer())
-        .type(JavaForkJoinTaskInst.type())
-        .transform(JavaForkJoinTaskInst.transformer())
-        .type(VirtualThreadInst.type())
-        .transform(VirtualThreadInst.transformer())
-        .installOn(inst);
+    AgentBuilder agentBuilder =
+        builder(opts, inst)
+            .type(ClassLoaderInst.type())
+            .transform(ClassLoaderInst.transformer())
+            .type(SSLSocketInst.type())
+            .transform(SSLSocketInst.transformer())
+            .type(SSLSocketStreamInst.inputStreamType())
+            .transform(SSLSocketStreamInst.inputStreamTransformer())
+            .type(SSLSocketStreamInst.outputStreamType())
+            .transform(SSLSocketStreamInst.outputStreamTransformer())
+            .type(SSLEngineInst.type())
+            .transform(SSLEngineInst.transformer())
+            .type(SocketChannelInst.type())
+            .transform(SocketChannelInst.transformer())
+            .type(NettySSLHandlerInst.type())
+            .transform(NettySSLHandlerInst.transformer())
+            .type(ApacheHttpAsyncClientInst.type())
+            .transform(ApacheHttpAsyncClientInst.transformer())
+            .type(ReactorNettyHttpClientInst.type())
+            .transform(ReactorNettyHttpClientInst.transformer())
+            .type(JavaExecutorInst.type())
+            .transform(JavaExecutorInst.transformer())
+            .type(JdkHttpClientInst.type())
+            .transform(JdkHttpClientInst.transformer(optEnabled(opts, "httpHeaders")))
+            .type(CallableInst.type())
+            .transform(CallableInst.transformer())
+            .type(RunnableInst.type())
+            .transform(RunnableInst.transformer())
+            .type(JavaForkJoinTaskInst.type())
+            .transform(JavaForkJoinTaskInst.transformer())
+            .type(VirtualThreadInst.type())
+            .transform(VirtualThreadInst.transformer());
+    if (optEnabled(opts, "preferHttp1Alpn")) {
+      agentBuilder =
+          agentBuilder
+              .type(SSLAlpnPreferenceInst.type())
+              .transform(SSLAlpnPreferenceInst.transformer());
+    }
+    if (!opts.getOrDefault("softprobeCaPath", "").isEmpty()) {
+      agentBuilder =
+          agentBuilder.type(TrustManagerInst.type()).transform(TrustManagerInst.transformer());
+    }
+    agentBuilder.installOn(inst);
 
     if (optEnabled(opts, "runtimeMetrics")) {
       try {
@@ -223,6 +246,10 @@ public class Agent {
           || RunnableInst.matches(clazz)
           || JavaForkJoinTaskInst.matches(clazz)
           || NettySSLHandlerInst.matches(clazz)
+          || ApacheHttpAsyncClientInst.matches(clazz)
+          || ReactorNettyHttpClientInst.matches(clazz)
+          || SSLAlpnPreferenceInst.matches(clazz)
+          || TrustManagerInst.matches(clazz)
           || VirtualThreadInst.matches(clazz)) {
         if (Agent.debugOn) {
           System.err.println("Retransforming " + clazz);
@@ -258,6 +285,7 @@ public class Agent {
     Class.forName(JdkHttpClientPropagation.class.getName());
     Class.forName(NettyChannelExtractor.class.getName());
     Class.forName(SSLStorage.class.getName());
+    Class.forName(SoftprobeTrustBridge.class.getName());
     Class.forName(ByteBufferExtractor.class.getName());
     Class.forName(NativeMemory.class.getName());
     Class.forName(NativeLib.class.getName());
@@ -413,6 +441,32 @@ public class Agent {
     } catch (Exception x) {
       System.err.println("Failed to setup instrumentation debugging");
       x.printStackTrace(System.err);
+    }
+  }
+
+  private static void setupPreferHttp1Alpn() {
+    SSLStorage.preferHttp1Alpn = true;
+    try {
+      Class<?> sslStorageClass =
+          Class.forName("io.opentelemetry.obi.java.instrumentations.data.SSLStorage", true, null);
+      Field preferField = sslStorageClass.getDeclaredField("preferHttp1Alpn");
+      preferField.set(null, true);
+    } catch (Exception x) {
+      if (Agent.debugOn) {
+        System.err.println("Failed to setup HTTP/1.1 ALPN preference: " + x);
+      }
+    }
+  }
+
+  private static void setupSoftprobeCaTrust(String caPath) {
+    try {
+      SoftprobeTrustBridge.installCaFile(caPath);
+      Class<?> bootstrapBridge =
+          Class.forName(
+              "io.opentelemetry.obi.java.instrumentations.data.SoftprobeTrustBridge", true, null);
+      bootstrapBridge.getMethod("installCaFile", String.class).invoke(null, caPath);
+    } catch (Exception x) {
+      System.err.println("Failed to setup Softprobe CA trust: " + x);
     }
   }
 }

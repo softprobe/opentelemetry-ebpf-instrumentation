@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/internal/jvmtools/jvm"
 	"go.opentelemetry.io/obi/pkg/internal/procs"
 	"go.opentelemetry.io/obi/pkg/obi"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 )
 
 func TestRunIfCurrentAttachHoldsLockWhileRunningAction(t *testing.T) {
@@ -1061,4 +1062,37 @@ func TestJavaInjector_HeaderPropagationRequiresAtomicOwnership(t *testing.T) {
 	injector := &JavaInjector{cfg: &obi.Config{}, log: slog.Default()}
 	injector.cfg.EBPF.ContextPropagation = config.ContextPropagationHeaders
 	require.Empty(t, injector.attachOpts(false), "Java must use the same atomic capability gate as eBPF")
+}
+
+func TestJavaInjectorSoftprobeCABundleAndOpts(t *testing.T) {
+	oldJavaAgentBytes := embeddedJavaAgentBytes
+	embeddedJavaAgentBytes = []byte("test-jar")
+	t.Cleanup(func() {
+		embeddedJavaAgentBytes = oldJavaAgentBytes
+		softprobe.SetActiveCAPEM(nil)
+	})
+
+	ca, err := softprobe.NewEphemeralCA()
+	require.NoError(t, err)
+	softprobe.SetActiveCAPEM(ca.CAPEM())
+
+	procRoot := filepath.Join(t.TempDir(), "proc", "root")
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, "tmp"), 0o755))
+
+	cfg := obi.DefaultConfig
+	cfg.Softprobe.Enabled = true
+	injector := &JavaInjector{cfg: &cfg, log: slog.Default()}
+
+	agentPath, caPath, err := injector.copyAgentBundle(procRoot, 1234, "")
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/obi-java-agent.jar", agentPath)
+	assert.Equal(t, "/tmp/sp-obi-ca.pem", caPath)
+
+	writtenCA, err := os.ReadFile(filepath.Join(procRoot, "tmp", "sp-obi-ca.pem"))
+	require.NoError(t, err)
+	assert.Equal(t, ca.CAPEM(), writtenCA)
+
+	opts := injector.attachOptsWithCA(false, caPath)
+	assert.Contains(t, opts, "preferHttp1Alpn=true")
+	assert.Contains(t, opts, "softprobeCaPath=/tmp/sp-obi-ca.pem")
 }

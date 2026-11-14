@@ -57,6 +57,7 @@ func V2ToRuntime(src *schema.Extension) (*obi.Config, error) {
 	defaults.Capture.Metrics.Features = nil
 	// Check before applying defaults to distinguish omitted sources from explicit ones.
 	serviceNameSourcesOmitted := src.Enrich == nil || src.Enrich.ServiceName.Sources == nil
+	defaults.Softprobe = defaultSoftprobeExtension()
 	var complete bool
 	var err error
 	src, complete, err = src.WithDefaults(defaults)
@@ -110,6 +111,9 @@ func V2ToRuntime(src *schema.Extension) (*obi.Config, error) {
 	applyV2Capture(&cfg, src, policy, complete)
 	applyV2Standalone(&cfg, src, complete)
 	if err := applyV2PeerMetadata(&cfg, src.Enrich, complete); err != nil {
+		return nil, err
+	}
+	if err := applyV2Softprobe(&cfg, src.Softprobe, complete); err != nil {
 		return nil, err
 	}
 	if err := applyV2CaptureAttributes(&cfg, src); err != nil {

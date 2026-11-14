@@ -1,0 +1,35 @@
+CREATE TABLE IF NOT EXISTS flight_fares (
+    id BIGINT PRIMARY KEY,
+    route_code VARCHAR(32) NOT NULL,
+    carrier VARCHAR(32) NOT NULL,
+    fare_cents INT NOT NULL,
+    cabin VARCHAR(16) NOT NULL,
+    baggage_note VARCHAR(64) NULL
+);
+
+INSERT IGNORE INTO flight_fares (id, route_code, carrier, fare_cents, cabin, baggage_note) VALUES
+(1,  'SFO-JFK', 'SP-AIR', 24900, 'ECONOMY', '1 carry-on'),
+(2,  'SFO-LAX', 'SP-AIR', 11900, 'ECONOMY', NULL),
+(3,  'LAX-NRT', 'SP-AIR', 84900, 'BUSINESS', '2 checked bags'),
+(4,  'SEA-ORD', 'SP-AIR', 21900, 'ECONOMY', NULL),
+(5,  'BOS-LHR', 'SP-AIR', 67900, 'PREMIUM', '1 checked bag'),
+(6,  'DFW-MIA', 'SP-AIR', 18900, 'ECONOMY', NULL),
+(7,  'DEN-YYZ', 'SP-AIR', 28900, 'ECONOMY', '1 carry-on'),
+(8,  'ATL-CDG', 'SP-AIR', 75900, 'BUSINESS', '2 checked bags'),
+(9,  'ORD-FRA', 'SP-AIR', 71900, 'PREMIUM', NULL),
+(10, 'JFK-HND', 'SP-AIR', 92900, 'BUSINESS', '2 checked bags'),
+(11, 'SFO-SIN', 'SP-AIR', 88900, 'BUSINESS', '2 checked bags'),
+(12, 'LAX-SYD', 'SP-AIR', 94900, 'BUSINESS', NULL),
+(13, 'SEA-ICN', 'SP-AIR', 79900, 'PREMIUM', '1 checked bag'),
+(14, 'BOS-DUB', 'SP-AIR', 52900, 'ECONOMY', NULL),
+(15, 'MIA-GRU', 'SP-AIR', 63900, 'PREMIUM', '1 checked bag'),
+(16, 'DEN-ANC', 'SP-AIR', 33900, 'ECONOMY', NULL),
+(17, 'IAH-MEX', 'SP-AIR', 22900, 'ECONOMY', '1 carry-on'),
+(18, 'PHX-HNL', 'SP-AIR', 41900, 'ECONOMY', NULL),
+(19, 'IAD-ZRH', 'SP-AIR', 69900, 'PREMIUM', '1 checked bag'),
+(20, 'EWR-BCN', 'SP-AIR', 58900, 'ECONOMY', NULL),
+(21, 'SAN-YVR', 'SP-AIR', 19900, 'ECONOMY', '1 carry-on'),
+(22, 'MSP-AMS', 'SP-AIR', 66900, 'PREMIUM', NULL),
+(23, 'DTW-NRT', 'SP-AIR', 86900, 'BUSINESS', '2 checked bags'),
+(24, 'CLT-MAD', 'SP-AIR', 60900, 'ECONOMY', NULL),
+(25, 'PDX-KEF', 'SP-AIR', 54900, 'ECONOMY', '1 carry-on');

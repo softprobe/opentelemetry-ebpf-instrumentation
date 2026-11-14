@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/pipe/swarm"
 	"go.opentelemetry.io/obi/pkg/pipe/swarm/swarms"
 	"go.opentelemetry.io/obi/pkg/runtimemetrics"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 	"go.opentelemetry.io/obi/pkg/transform"
 )
 
@@ -83,6 +84,11 @@ func New(ctx context.Context, ctxInfo *global.ContextInfo, config *obi.Config) (
 }
 
 func NewWithProtocolMetricSelection(ctx context.Context, ctxInfo *global.ContextInfo, config *obi.Config, selection *instrumentations.InstrumentationSelection) (*Instrumenter, error) {
+	config.ApplySoftprobeRuntimeDefaults()
+	ctxInfo.SoftprobeConfig = config.Softprobe
+	if config.Softprobe.Enabled && ctxInfo.SoftprobeReplayRegistry == nil {
+		ctxInfo.SoftprobeReplayRegistry = softprobe.SharedReplayRegistry()
+	}
 	setupFeatureContextInfo(ctx, ctxInfo, config)
 
 	tracesInput := msg2.QueueFromConfig[[]request.Span](config, ctxInfo.Metrics, "tracesInput")

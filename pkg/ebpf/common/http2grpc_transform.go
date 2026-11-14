@@ -845,7 +845,11 @@ func ReadHTTP2InfoIntoSpan(parseContext *EBPFParseContext, record *ringbuf.Recor
 		return request.Span{}, true, nil
 	}
 
-	return http2FromBuffers(parseContext, event)
+	span, ignore, err := http2FromBuffers(parseContext, event)
+	if !ignore && err == nil && parseContext.softprobeEnabled() {
+		captureSoftprobeHTTP2KProbe(parseContext.softprobeMaxBodyBytes, &span, event, nil, nil)
+	}
+	return span, ignore, err
 }
 
 type http2FrameType uint8

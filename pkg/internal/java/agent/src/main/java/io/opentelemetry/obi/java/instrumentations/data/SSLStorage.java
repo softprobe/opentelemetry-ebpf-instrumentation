@@ -5,16 +5,26 @@
 
 package io.opentelemetry.obi.java.instrumentations.data;
 
+import io.opentelemetry.obi.java.ebpf.ThreadInfo;
 import io.opentelemetry.obi.java.instrumentations.util.CappedConcurrentHashMap;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
 
 public class SSLStorage {
   public static Method bootExtractMethod = null;
+  public static Method bootExtractIOSessionMethod = null;
   public static Field bootNettyConnectionField = null;
 
   public static boolean debugOn = false;
+  public static volatile boolean preferHttp1Alpn = false;
+
+  private static volatile boolean alpnMethodsResolved = false;
+  private static Method getApplicationProtocolsMethod = null;
+  private static Method setApplicationProtocolsMethod = null;
 
   public static Field bootDebugOn = null;
 
@@ -155,6 +165,23 @@ public class SSLStorage {
       }
     }
     return bootExtractMethod;
+  }
+
+  public static Method getBootExtractIOSessionMethod() {
+    if (bootExtractIOSessionMethod == null) {
+      try {
+        Class<?> extractorClass =
+            Class.forName(
+                "io.opentelemetry.obi.java.instrumentations.util.NettyChannelExtractor",
+                true,
+                null);
+        bootExtractIOSessionMethod =
+            extractorClass.getMethod("extractConnectionFromIOSession", Object.class);
+      } catch (Exception x) {
+        System.err.println("[SSLStorage] Failed to get boot extract IOSession method " + x);
+      }
+    }
+    return bootExtractIOSessionMethod;
   }
 
   public static Field getBootNettyConnectionField() {
@@ -315,5 +342,81 @@ public class SSLStorage {
     int taskId = System.identityHashCode(task);
     Long parentThreadId = tasks.get(taskId);
     return parentThreadId == null ? jdkHttpClientTasks.get(taskId) : parentThreadId;
+  }
+
+  public static void propagateParentIfTracked(Object task) {
+    if (task == null || ThreadInfo.loomTaskOrVirtualThread(task)) {
+      return;
+    }
+    Long parentId = parentThreadId(task);
+    if (parentId != null) {
+      long threadId = ThreadInfo.currentTid();
+      if (parentId != threadId) {
+        ThreadInfo.sendTaskParentThreadContext(parentId);
+      }
+    }
+  }
+
+  public static String[] filterHttp1AlpnProtocols(String[] protocols) {
+    if (protocols == null || protocols.length < 2) {
+      return protocols;
+    }
+    boolean hasHttp1 = false;
+    boolean hasH2 = false;
+    for (int i = 0; i < protocols.length; i++) {
+      String p = protocols[i];
+      if ("http/1.1".equals(p)) {
+        hasHttp1 = true;
+      } else if ("h2".equals(p)) {
+        hasH2 = true;
+      }
+    }
+    if (!hasHttp1 || !hasH2) {
+      return protocols;
+    }
+    List<String> filtered = new ArrayList<>(protocols.length - 1);
+    for (int i = 0; i < protocols.length; i++) {
+      String p = protocols[i];
+      if (!"h2".equals(p)) {
+        filtered.add(p);
+      }
+    }
+    return filtered.toArray(new String[0]);
+  }
+
+  private static void resolveAlpnMethods() {
+    if (alpnMethodsResolved) {
+      return;
+    }
+    synchronized (SSLStorage.class) {
+      if (alpnMethodsResolved) {
+        return;
+      }
+      try {
+        getApplicationProtocolsMethod = SSLParameters.class.getMethod("getApplicationProtocols");
+        setApplicationProtocolsMethod =
+            SSLParameters.class.getMethod("setApplicationProtocols", String[].class);
+      } catch (NoSuchMethodException ignored) {
+      }
+      alpnMethodsResolved = true;
+    }
+  }
+
+  public static void applyHttp1AlpnPreference(SSLParameters params) {
+    if (!preferHttp1Alpn || params == null) {
+      return;
+    }
+    resolveAlpnMethods();
+    if (getApplicationProtocolsMethod == null || setApplicationProtocolsMethod == null) {
+      return;
+    }
+    try {
+      String[] current = (String[]) getApplicationProtocolsMethod.invoke(params);
+      String[] filtered = filterHttp1AlpnProtocols(current);
+      if (filtered != current) {
+        setApplicationProtocolsMethod.invoke(params, (Object) filtered);
+      }
+    } catch (Exception ignored) {
+    }
   }
 }
