@@ -11,11 +11,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.opentelemetry.obi.java.instrumentations.data.SoftprobeTrustBridge;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.lang.instrument.Instrumentation;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.CertificateException;
@@ -71,8 +73,8 @@ class TrustManagerInstTest {
         "ca",
         "-keyalg",
         "EC",
-        "-groupname",
-        "secp256r1",
+        "-keysize",
+        "256",
         "-dname",
         "CN=Softprobe OBI Ephemeral Root CA,O=Softprobe",
         "-ext",
@@ -82,6 +84,8 @@ class TrustManagerInstTest {
         "-storetype",
         "PKCS12",
         "-storepass",
+        "changeit",
+        "-keypass",
         "changeit");
     runKeytool(
         "-exportcert",
@@ -101,8 +105,8 @@ class TrustManagerInstTest {
         "leaf",
         "-keyalg",
         "EC",
-        "-groupname",
-        "secp256r1",
+        "-keysize",
+        "256",
         "-dname",
         "CN=spair.softprobe.ai",
         "-keystore",
@@ -110,6 +114,8 @@ class TrustManagerInstTest {
         "-storetype",
         "PKCS12",
         "-storepass",
+        "changeit",
+        "-keypass",
         "changeit");
     runKeytool(
         "-certreq",
@@ -145,8 +151,8 @@ class TrustManagerInstTest {
         "rogue",
         "-keyalg",
         "EC",
-        "-groupname",
-        "secp256r1",
+        "-keysize",
+        "256",
         "-dname",
         "CN=spair.softprobe.ai",
         "-keystore",
@@ -154,6 +160,8 @@ class TrustManagerInstTest {
         "-storetype",
         "PKCS12",
         "-storepass",
+        "changeit",
+        "-keypass",
         "changeit");
     runKeytool(
         "-exportcert",
@@ -248,9 +256,21 @@ class TrustManagerInstTest {
     cmd[0] = keytool.getAbsolutePath();
     System.arraycopy(args, 0, cmd, 1, args.length);
     Process proc = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    try (InputStream in = proc.getInputStream()) {
+      byte[] buf = new byte[1024];
+      int read;
+      while ((read = in.read(buf)) != -1) {
+        out.write(buf, 0, read);
+      }
+    }
     int code = proc.waitFor();
     if (code != 0) {
-      throw new IllegalStateException("keytool exited with code " + code);
+      throw new IllegalStateException(
+          "keytool exited with code "
+              + code
+              + ": "
+              + new String(out.toByteArray(), StandardCharsets.UTF_8));
     }
   }
 
