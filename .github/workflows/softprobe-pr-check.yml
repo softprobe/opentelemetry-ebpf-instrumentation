@@ -5,6 +5,7 @@ on:
     branches: [main]
   push:
     branches: [main, "ci/**", "feat/**", "fix/**"]
+  workflow_dispatch:
 
 concurrency:
   group: softprobe-pr-${{ github.head_ref || github.run_id }}
