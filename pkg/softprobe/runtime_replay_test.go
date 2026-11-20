@@ -1281,3 +1281,226 @@ func TestRuntimeEgressServerSpeaksFirstHandlerDispatch(t *testing.T) {
 	assert.Equal(t, "port-fallback-greeting\n", fallbackGreeting)
 	assert.Equal(t, 0, <-emptyPreambleHandler.peekLenCh)
 }
+
+func TestHTTPResolveOutboundTraceRejectsStalePooledWriteContext(t *testing.T) {
+	registry := NewReplayRegistry(32, time.Minute)
+	tracker := NewWriteContextTracker(64, time.Minute)
+
+	trace1 := makeTraceID(0x71)
+	span1 := makeSpanID(0x71)
+	trace2 := makeTraceID(0x72)
+	span2 := makeSpanID(0x72)
+
+	registry.Register(trace1, ReplaySession{
+		Mode:            ModeReplay,
+		RecordedTraceID: FormatTraceIDHex(trace1),
+		ReplayID:        "rep-1",
+	})
+	registry.Register(trace2, ReplaySession{
+		Mode:            ModeReplay,
+		RecordedTraceID: FormatTraceIDHex(trace2),
+		ReplayID:        "rep-2",
+	})
+
+	const cookie = uint64(0x998877)
+	tracker.RecordWrite(SocketWriteContext{
+		SockCookie:   cookie,
+		ByteOffset:   180,
+		PayloadLen:   220,
+		TraceID:      trace1,
+		ServerSpanID: span1,
+	})
+
+	handler := NewHTTPProtocolHandler(Config{}, nil, registry, tracker, nil)
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		tracker.RecordWrite(SocketWriteContext{
+			SockCookie:   cookie,
+			ByteOffset:   400,
+			PayloadLen:   210,
+			TraceID:      trace2,
+			ServerSpanID: span2,
+		})
+	}()
+
+	gotTrace, gotSpan, ok := handler.resolveOutboundTrace(t.Context(), http.Header{}, cookie, 400, 610)
+	require.True(t, ok)
+	assert.Equal(t, trace2, gotTrace)
+	assert.Equal(t, span2, gotSpan)
+
+	_, ok = handler.resolvePostForwardTrace(t.Context(), cookie, 610, 820)
+	assert.False(t, ok)
+}
+
+func TestHTTPHandleTLSConnectionCorrelatesCoalescedFirstRequest(t *testing.T) {
+	ca, err := NewEphemeralCA()
+	require.NoError(t, err)
+
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		require.NoError(t, readErr)
+		assert.Equal(t, `{"order":"B335QK"}`, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"CONFIRMED"}`))
+	}))
+	defer upstream.Close()
+
+	origDst := netip.MustParseAddrPort(upstream.Listener.Addr().String())
+	tracker := NewWriteContextTracker(0, 0)
+	cache := NewHTTPExchangeCache(0, 0)
+	registry := NewReplayRegistry(0, 0)
+	liveTrace := makeTraceID(0x88)
+	liveSpan := makeSpanID(0x88)
+	const cookie = uint64(0xabcdef12)
+
+	handler := NewHTTPProtocolHandler(
+		Config{},
+		ca,
+		registry,
+		tracker,
+		nil,
+		WithUpstreamTLSConfig(&tls.Config{InsecureSkipVerify: true}),
+		WithHTTPExchangeCache(cache),
+	)
+	defer handler.Close()
+
+	clientSide, serverSide := net.Pipe()
+	countingServer := NewCountingConn(serverSide)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- handler.HandleConnection(t.Context(), OutgoingConnectionContext{
+			ClientConn: countingServer,
+			BufReader:  bufio.NewReaderSize(countingServer, defaultProxyBufSize),
+			SockCookie: cookie,
+			OrigDst:    origDst,
+		})
+	}()
+
+	countingClient := NewCountingConn(clientSide)
+	tlsClient := tls.Client(countingClient, &tls.Config{
+		RootCAs:    ca.CertPool(),
+		ServerName: "127.0.0.1",
+		NextProtos: []string{"http/1.1"},
+	})
+	require.NoError(t, tlsClient.Handshake())
+
+	// Record a zero-trace handshake write followed by the HTTP request write on the same socket.
+	handshakeBytes := countingClient.BytesRead()
+	_ = handshakeBytes
+	tracker.RecordWrite(SocketWriteContext{
+		SockCookie: cookie,
+		ByteOffset: 0,
+		PayloadLen: 128,
+	})
+	tracker.RecordWrite(SocketWriteContext{
+		SockCookie:   cookie,
+		ByteOffset:   128,
+		PayloadLen:   256,
+		TraceID:      liveTrace,
+		ServerSpanID: liveSpan,
+	})
+
+	req, err := http.NewRequest(http.MethodPost, "https://127.0.0.1/ndc/v21.3/orderretrieve", strings.NewReader(`{"order":"B335QK"}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	require.NoError(t, req.Write(tlsClient))
+
+	resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
+	require.NoError(t, err)
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, `{"status":"CONFIRMED"}`, string(respBody))
+
+	_ = tlsClient.Close()
+	_ = clientSide.Close()
+	require.NoError(t, <-errCh)
+
+	captured, ok := cache.ConsumeHTTPClient(liveTrace, http.MethodPost, "/ndc/v21.3/orderretrieve")
+	require.True(t, ok)
+	assert.Equal(t, `{"order":"B335QK"}`, string(captured.RequestBody))
+	assert.Equal(t, `{"status":"CONFIRMED"}`, string(captured.ResponseBody))
+}
+
+func TestRuntimeInterceptsDelayedTLSClientHello(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<OrderViewRS><OrderID>ORD-DELAYED</OrderID></OrderViewRS>`))
+	}))
+	defer upstream.Close()
+
+	origDst := netip.MustParseAddrPort(upstream.Listener.Addr().String())
+	tracker := NewWriteContextTracker(0, 0)
+	bridge := NewDataplaneBridge(tracker)
+	liveTrace := makeTraceID(0x99)
+	liveSpan := makeSpanID(0x99)
+	const cookie = uint64(0x99887766)
+
+	lnEgressProbe, err := ListenNonMPTCP(context.Background(), "tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	egressPort := int(extractPortFromAddr(lnEgressProbe.Addr()))
+	_ = lnEgressProbe.Close()
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.AppID = "travel-ota"
+	cfg.IngressProxyPort = -1
+	cfg.EgressProxyPort = egressPort
+
+	rt, err := NewRuntime(
+		cfg,
+		WithRuntimeCACertPath(""),
+		WithRuntimeDataplaneBridge(bridge),
+		WithRuntimeHTTPHandlerOptions(WithUpstreamTLSConfig(&tls.Config{InsecureSkipVerify: true})),
+		WithRuntimeEgressTargetResolver(func(net.Addr) (EgressTarget, bool) {
+			return EgressTarget{
+				SockCookie: cookie,
+				AddrPort:   origDst,
+				PID:        1234,
+			}, true
+		}),
+	)
+	require.NoError(t, err)
+	require.NoError(t, rt.Start(t.Context()))
+	defer func() { _ = rt.Close() }()
+
+	rawConn, err := net.Dial("tcp", rt.EgressAddr().String())
+	require.NoError(t, err)
+
+	// Simulate slow JVM SSLContext initialization after TCP connect completes (>200ms).
+	time.Sleep(300 * time.Millisecond)
+
+	tlsClient := tls.Client(rawConn, &tls.Config{
+		RootCAs:    rt.CA().CertPool(),
+		ServerName: "127.0.0.1",
+		NextProtos: []string{"http/1.1"},
+	})
+	require.NoError(t, tlsClient.Handshake())
+
+	tracker.RecordWrite(SocketWriteContext{
+		SockCookie:   cookie,
+		ByteOffset:   0,
+		PayloadLen:   256,
+		TraceID:      liveTrace,
+		ServerSpanID: liveSpan,
+	})
+
+	req, err := http.NewRequest(http.MethodPost, "https://127.0.0.1/ndc/v21.3/orderchange", strings.NewReader(`<OrderChangeRQ/>`))
+	require.NoError(t, err)
+	require.NoError(t, req.Write(tlsClient))
+
+	resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, `<OrderViewRS><OrderID>ORD-DELAYED</OrderID></OrderViewRS>`, string(body))
+
+	_ = tlsClient.Close()
+
+	captured, ok := bridge.ExchangeCache().ConsumeHTTPClient(liveTrace, http.MethodPost, "/ndc/v21.3/orderchange")
+	require.True(t, ok, "delayed TLS ClientHello must still be intercepted by HTTPProtocolHandler")
+	assert.Equal(t, `<OrderViewRS><OrderID>ORD-DELAYED</OrderID></OrderViewRS>`, string(captured.ResponseBody))
+}
