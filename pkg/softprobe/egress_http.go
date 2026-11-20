@@ -250,7 +250,6 @@ func (h *HTTPProtocolHandler) handleTLSConnection(ctx context.Context, oc Outgoi
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return fmt.Errorf("tls handshake with client: %w", err)
 	}
-	postHandshakeRawOffset := rawConsumedBytes(oc.ClientConn, oc.BufReader)
 
 	sniMu.Lock()
 	negotiatedSNI := clientSNI
@@ -261,7 +260,7 @@ func (h *HTTPProtocolHandler) handleTLSConnection(ctx context.Context, oc Outgoi
 	alpn := tlsConn.ConnectionState().NegotiatedProtocol
 
 	if alpn == "h2" {
-		return h.serveHTTP2Connection(ctx, tlsConn, oc, true, negotiatedSNI, postHandshakeRawOffset)
+		return h.serveHTTP2Connection(ctx, tlsConn, oc, true, negotiatedSNI, 0)
 	}
 
 	tlsBuf := bufio.NewReaderSize(tlsConn, defaultProxyBufSize)
@@ -270,13 +269,13 @@ func (h *HTTPProtocolHandler) handleTLSConnection(ctx context.Context, oc Outgoi
 		return nil
 	}
 	if strings.HasPrefix(string(plainPeek), "PRI ") {
-		return h.serveHTTP2Connection(ctx, &prebufferedConn{Conn: tlsConn, reader: tlsBuf}, oc, true, negotiatedSNI, postHandshakeRawOffset)
+		return h.serveHTTP2Connection(ctx, &prebufferedConn{Conn: tlsConn, reader: tlsBuf}, oc, true, negotiatedSNI, 0)
 	}
 	if !looksLikeHTTPPreface(plainPeek) {
 		return h.spliceNonHTTPTLS(ctx, tlsConn, tlsBuf, oc.OrigDst, negotiatedSNI)
 	}
 
-	return h.serveHTTP1Loop(ctx, tlsConn, tlsBuf, oc.BufReader, oc, true, negotiatedSNI, postHandshakeRawOffset)
+	return h.serveHTTP1Loop(ctx, tlsConn, tlsBuf, oc.BufReader, oc, true, negotiatedSNI, 0)
 }
 
 func (h *HTTPProtocolHandler) spliceNonHTTPTLS(
@@ -522,7 +521,7 @@ func (h *HTTPProtocolHandler) resolvePostForwardTrace(
 	if wctx, ok := lookupWriteInFrameRange(h.writeTracker, sockCookie, rawStart, rawEnd); ok && wctx.TraceID != ([16]byte{}) {
 		return wctx.TraceID, true
 	}
-	deadline := time.Now().Add(5 * time.Millisecond)
+	deadline := time.Now().Add(writeContextPollBudget)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			break

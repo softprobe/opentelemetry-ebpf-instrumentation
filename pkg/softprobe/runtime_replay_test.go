@@ -1332,3 +1332,94 @@ func TestHTTPResolveOutboundTraceRejectsStalePooledWriteContext(t *testing.T) {
 	_, ok = handler.resolvePostForwardTrace(t.Context(), cookie, 610, 820)
 	assert.False(t, ok)
 }
+
+func TestHTTPHandleTLSConnectionCorrelatesCoalescedFirstRequest(t *testing.T) {
+	ca, err := NewEphemeralCA()
+	require.NoError(t, err)
+
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		require.NoError(t, readErr)
+		assert.Equal(t, `{"order":"B335QK"}`, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"CONFIRMED"}`))
+	}))
+	defer upstream.Close()
+
+	origDst := netip.MustParseAddrPort(upstream.Listener.Addr().String())
+	tracker := NewWriteContextTracker(0, 0)
+	cache := NewHTTPExchangeCache(0, 0)
+	registry := NewReplayRegistry(0, 0)
+	liveTrace := makeTraceID(0x88)
+	liveSpan := makeSpanID(0x88)
+	const cookie = uint64(0xabcdef12)
+
+	handler := NewHTTPProtocolHandler(
+		Config{},
+		ca,
+		registry,
+		tracker,
+		nil,
+		WithUpstreamTLSConfig(&tls.Config{InsecureSkipVerify: true}),
+		WithHTTPExchangeCache(cache),
+	)
+	defer handler.Close()
+
+	clientSide, serverSide := net.Pipe()
+	countingServer := NewCountingConn(serverSide)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- handler.HandleConnection(t.Context(), OutgoingConnectionContext{
+			ClientConn: countingServer,
+			BufReader:  bufio.NewReaderSize(countingServer, defaultProxyBufSize),
+			SockCookie: cookie,
+			OrigDst:    origDst,
+		})
+	}()
+
+	countingClient := NewCountingConn(clientSide)
+	tlsClient := tls.Client(countingClient, &tls.Config{
+		RootCAs:    ca.CertPool(),
+		ServerName: "127.0.0.1",
+		NextProtos: []string{"http/1.1"},
+	})
+	require.NoError(t, tlsClient.Handshake())
+
+	// Record a zero-trace handshake write followed by the HTTP request write on the same socket.
+	handshakeBytes := countingClient.BytesRead()
+	_ = handshakeBytes
+	tracker.RecordWrite(SocketWriteContext{
+		SockCookie: cookie,
+		ByteOffset: 0,
+		PayloadLen: 128,
+	})
+	tracker.RecordWrite(SocketWriteContext{
+		SockCookie:   cookie,
+		ByteOffset:   128,
+		PayloadLen:   256,
+		TraceID:      liveTrace,
+		ServerSpanID: liveSpan,
+	})
+
+	req, err := http.NewRequest(http.MethodPost, "https://127.0.0.1/ndc/v21.3/orderretrieve", strings.NewReader(`{"order":"B335QK"}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	require.NoError(t, req.Write(tlsClient))
+
+	resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
+	require.NoError(t, err)
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, `{"status":"CONFIRMED"}`, string(respBody))
+
+	_ = tlsClient.Close()
+	_ = clientSide.Close()
+	require.NoError(t, <-errCh)
+
+	captured, ok := cache.ConsumeHTTPClient(liveTrace, http.MethodPost, "/ndc/v21.3/orderretrieve")
+	require.True(t, ok)
+	assert.Equal(t, `{"order":"B335QK"}`, string(captured.RequestBody))
+	assert.Equal(t, `{"status":"CONFIRMED"}`, string(captured.ResponseBody))
+}
