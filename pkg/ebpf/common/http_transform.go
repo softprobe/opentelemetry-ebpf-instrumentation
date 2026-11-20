@@ -214,6 +214,10 @@ func httpRequestResponseToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo, r
 }
 
 func postProcessHTTPSpan(parseCtx *EBPFParseContext, httpSpan *request.Span, req *http.Request, resp *http.Response) request.Span {
+	if parseCtx.softprobeEnabled() {
+		captureSoftprobeHTTP(parseCtx.softprobeMaxBodyBytes, httpSpan, req, resp)
+	}
+
 	if httpSpan.IsClientSpan() && parseCtx != nil && parseCtx.payloadExtraction.HTTP.AWS.Enabled {
 		span, ok := ebpfhttp.AWSSNSSpan(httpSpan, req, resp)
 		if ok {
@@ -409,7 +413,7 @@ func HTTPInfoEventToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo) (reques
 		requestBuffer = largebuf.NewLargeBufferFrom(event.Buf[:])
 	}
 
-	if parseCtx != nil && !parseCtx.payloadExtraction.Enabled() {
+	if parseCtx != nil && !parseCtx.payloadExtraction.Enabled() && !parseCtx.softprobeEnabled() {
 		// There's no need to parse HTTP headers/body,
 		// create the span directly.
 		return httpRequestToSpan(event, requestBuffer), false, nil
@@ -417,7 +421,11 @@ func HTTPInfoEventToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo) (reques
 
 	if !hasResponse {
 		// Large buffers disabled
-		return httpRequestToSpan(event, requestBuffer), false, nil
+		span := httpRequestToSpan(event, requestBuffer)
+		if parseCtx.softprobeEnabled() {
+			captureSoftprobeHTTPRequestBuffer(parseCtx.softprobeMaxBodyBytes, &span, requestBuffer)
+		}
+		return span, false, nil
 	}
 
 	// http.ReadRequest requires a *bufio.Reader; that one allocation is unavoidable.
@@ -426,7 +434,11 @@ func HTTPInfoEventToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo) (reques
 	resp, err2 := httpSafeParseResponse(responseBuffer, req)
 	if err != nil || err2 != nil {
 		slog.Debug("error while parsing http request or response, falling back to manual HTTP info parsing", "reqErr", err, "respErr", err2)
-		return httpRequestToSpan(event, requestBuffer), false, nil
+		span := httpRequestToSpan(event, requestBuffer)
+		if parseCtx.softprobeEnabled() {
+			captureSoftprobeHTTPRequestBuffer(parseCtx.softprobeMaxBodyBytes, &span, requestBuffer)
+		}
+		return span, false, nil
 	}
 
 	// When the body is empty but Content-Length indicates data should be

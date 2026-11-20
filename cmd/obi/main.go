@@ -111,6 +111,7 @@ func main() {
 		configPath = &cfg
 	}
 	config, configVersion, configData := loadConfig(configPath)
+	config.ApplySoftprobeRuntimeDefaults()
 	if err := lvl.UnmarshalText([]byte(config.LogLevel)); err != nil {
 		slog.Error("unknown log level specified, choices are [DEBUG, INFO, WARN, ERROR]", "error", err)
 		os.Exit(-1)
@@ -173,7 +174,10 @@ func main() {
 	if configVersion == configVersionV2 && configPath != nil && *configPath != "" && config.Enabled(obi.FeatureAppO11y) {
 		updater := discover.NewCriteriaUpdater(config)
 		opts = append(opts, instrumenter.WithCriteriaUpdater(updater))
-		go configwatch.Watch(ctx, *configPath, configData, updater.Update)
+		go configwatch.Watch(ctx, *configPath, configData, func(ctx context.Context, refreshed *obi.Config) error {
+			refreshed.ApplySoftprobeRuntimeDefaults()
+			return updater.Update(ctx, refreshed)
+		})
 	}
 	var runErr error
 	if configVersion == configVersionV2 {

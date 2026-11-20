@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/pipe/msg"
 	"go.opentelemetry.io/obi/pkg/pipe/swarm"
 	"go.opentelemetry.io/obi/pkg/pipe/swarm/swarms"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 )
 
 const reporterName = "go.opentelemetry.io/obi"
@@ -39,12 +40,17 @@ func makeTracesReceiver(
 	selectorCfg *attributes.SelectorConfig,
 	input *msg.Queue[[]request.Span],
 ) *tracesOTELReceiver {
+	var spEnricher *softprobe.SpanEnricher
+	if ctxInfo != nil && ctxInfo.SoftprobeConfig.Enabled {
+		spEnricher = softprobe.NewSpanEnricher(ctxInfo.SoftprobeConfig, ctxInfo.SoftprobeReplayRegistry)
+	}
 	return &tracesOTELReceiver{
 		cfg:                cfg,
 		ctxInfo:            ctxInfo,
 		selectorCfg:        selectorCfg,
 		is:                 instrumentations.NewInstrumentationSelection(cfg.Instrumentations),
 		spanMetricsEnabled: spanMetricsEnabled,
+		softprobeEnricher:  spEnricher,
 		input:              input.Subscribe(msg.SubscriberName("otel.TracesReceiver")),
 		attributeCache:     expirable2.NewLRU[svc.UID, []attribute.KeyValue](1024, nil, 5*time.Minute),
 	}
@@ -73,6 +79,7 @@ type tracesOTELReceiver struct {
 	selectorCfg        *attributes.SelectorConfig
 	is                 instrumentations.InstrumentationSelection
 	spanMetricsEnabled bool
+	softprobeEnricher  *softprobe.SpanEnricher
 	attributeCache     *expirable2.LRU[svc.UID, []attribute.KeyValue]
 	input              <-chan []request.Span
 }
@@ -108,7 +115,7 @@ func (tr *tracesOTELReceiver) processSpans(ctx context.Context, exp tracesExport
 			if tr.spanMetricsEnabled {
 				envResourceAttrs = append(envResourceAttrs, attribute.Bool(string(attr.SkipSpanMetrics.OTEL()), true))
 			}
-			traces := tracesgen.GenerateTracesWithSelectedResourceAttributes(
+			traces := tracesgen.GenerateTracesWithSoftprobe(
 				tr.attributeCache,
 				&sample.Span.Service,
 				envResourceAttrs,
@@ -116,6 +123,7 @@ func (tr *tracesOTELReceiver) processSpans(ctx context.Context, exp tracesExport
 				spanGroup,
 				reporterName,
 				tr.selectorCfg.SelectionCfg,
+				tr.softprobeEnricher,
 				tr.ctxInfo.ExtraResourceAttributes...)
 			err := exp.ConsumeTraces(ctx, traces)
 			if err != nil {
@@ -141,6 +149,9 @@ func (tr *tracesOTELReceiver) provideLoop(ctx context.Context) {
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultTraceShutdownTimeout)
 		defer cancel()
+		if tr.softprobeEnricher != nil {
+			_ = tr.softprobeEnricher.Close(shutdownCtx)
+		}
 		err := exp.Shutdown(shutdownCtx)
 		if err != nil {
 			slog.Error("error shutting down traces exporter", "error", err)

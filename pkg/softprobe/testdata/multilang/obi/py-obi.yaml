@@ -1,0 +1,24 @@
+file_format: "1.0"
+extensions:
+  obi:
+    version: "2.0"
+    capture:
+      policy:
+        default_action: exclude
+        match_order: first_match_wins
+        poll_interval: 500ms
+        min_process_age: 0s
+      rules:
+        - action: include
+          name: multilang-py
+          description: Capture Python FastAPI fixture
+          match:
+            process:
+              exe_path_glob:
+                - "*python*"
+    softprobe:
+      enabled: true
+      app_id: multilang-py
+      backend_url: http://multilang-backend:8090
+      record_rate: 1.0
+      max_body_bytes: 262144

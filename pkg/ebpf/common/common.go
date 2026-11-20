@@ -338,6 +338,7 @@ type EBPFParseContext struct {
 	kafkaTopicUUIDToName        *simplelru.LRU[kafkaparser.UUID, string]
 	kafkaConsumerGroups         *KafkaConsumerGroups
 	payloadExtraction           config.PayloadExtraction
+	softprobeMaxBodyBytes       int
 	httpEnricher                *ebpfhttp.HTTPEnricher
 	sqlppPreparedStatements     *ebpfhttp.SQLPPPreparedStatements
 	dnsEvents                   *expirable.LRU[dnsparser.DNSId, *request.Span]
@@ -519,6 +520,11 @@ func NewEBPFParseContext(cfg *config.EBPFTracer, spansChan *msg.Queue[[]request.
 		}
 	}
 
+	var softprobeMaxBodyBytes int
+	if cfg != nil {
+		softprobeMaxBodyBytes = cfg.SoftprobeCaptureMaxBytes
+	}
+
 	parseCtx := &EBPFParseContext{
 		protocolDebug:              protocolDebug,
 		h2c:                        h2c,
@@ -534,6 +540,7 @@ func NewEBPFParseContext(cfg *config.EBPFTracer, spansChan *msg.Queue[[]request.
 		kafkaTopicUUIDToName:       kafkaTopicUUIDToName,
 		kafkaConsumerGroups:        kafkaConsumerGroups,
 		payloadExtraction:          payloadExtraction,
+		softprobeMaxBodyBytes:      softprobeMaxBodyBytes,
 		httpEnricher:               httpEnricher,
 		sqlppPreparedStatements:    sqlppPreparedStatements,
 		dnsEvents:                  dnsEvents,
@@ -551,6 +558,10 @@ func NewEBPFParseContext(cfg *config.EBPFTracer, spansChan *msg.Queue[[]request.
 	}
 
 	return parseCtx
+}
+
+func (ctx *EBPFParseContext) softprobeEnabled() bool {
+	return ctx != nil && ctx.softprobeMaxBodyBytes > 0
 }
 
 // Close discards pending asynchronous parse state.

@@ -1,0 +1,58 @@
+name: Promote Softprobe OBI Release to Docker Hub
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: Promote verified GHCR image to Docker Hub
+    if: github.repository == 'softprobe/opentelemetry-ebpf-instrumentation'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve release commit SHA
+        id: vars
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: softprobe
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+
+      - name: Promote GHCR CI image to Docker Hub
+        env:
+          SOURCE_SHA: ${{ steps.vars.outputs.source_sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          src="ghcr.io/${REPO}/sp-obi:sha-${SOURCE_SHA}"
+          docker buildx imagetools inspect "${src}" >/dev/null
+          tag_args=(--tag "softprobe/obi:${RELEASE_TAG}")
+          if [ "${IS_PRERELEASE}" != "true" ]; then
+            tag_args+=(--tag "softprobe/obi:latest")
+          fi
+          docker buildx imagetools create "${tag_args[@]}" "${src}"

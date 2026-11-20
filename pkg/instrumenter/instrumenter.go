@@ -33,6 +33,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/netolly/flowdef"
 	"go.opentelemetry.io/obi/pkg/obi"
 	"go.opentelemetry.io/obi/pkg/pipe/global"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 	statsagent "go.opentelemetry.io/obi/pkg/statsolly/agent"
 	"go.opentelemetry.io/obi/pkg/transform"
 )
@@ -90,6 +91,12 @@ func runWithContextInfo(
 	ctx context.Context, cfg *obi.Config, ctxInfo *global.ContextInfo,
 	selection *instrumentations.InstrumentationSelection, opts ...Option,
 ) error {
+	cfg.ApplySoftprobeRuntimeDefaults()
+	ctxInfo.SoftprobeConfig = cfg.Softprobe
+	if cfg.Softprobe.Enabled && ctxInfo.SoftprobeReplayRegistry == nil {
+		ctxInfo.SoftprobeReplayRegistry = softprobe.SharedReplayRegistry()
+	}
+
 	for _, opt := range opts {
 		opt(ctxInfo)
 	}
@@ -117,6 +124,23 @@ func runWithContextInfo(
 	}
 
 	startHealthCheck(ctx, g, cfg.HealthCheck)
+
+	if cfg.Softprobe.Enabled {
+		spRuntime, err := softprobe.NewRuntime(
+			cfg.Softprobe,
+			softprobe.WithRuntimeReplayRegistry(ctxInfo.SoftprobeReplayRegistry),
+		)
+		if err != nil {
+			return fmt.Errorf("initializing softprobe runtime: %w", err)
+		}
+		if err := spRuntime.Start(ctx); err != nil {
+			return fmt.Errorf("starting softprobe runtime: %w", err)
+		}
+		g.Go(func() error {
+			<-ctx.Done()
+			return spRuntime.Close()
+		})
+	}
 
 	if app {
 		g.Go(func() error {
@@ -249,6 +273,8 @@ func buildServiceNameTemplate(config *obi.Config) (*template.Template, error) {
 func BuildCommonContextInfo(
 	ctx context.Context, config *obi.Config,
 ) (*global.ContextInfo, error) {
+	config.ApplySoftprobeRuntimeDefaults()
+
 	// merging deprecated resource labels definition for backwards compatibility
 	resourceLabels := config.Attributes.Kubernetes.ResourceLabels
 	if resourceLabels == nil {
@@ -273,11 +299,17 @@ func BuildCommonContextInfo(
 		return nil, err
 	}
 
+	var spRegistry *softprobe.ReplayRegistry
+	if config.Softprobe.Enabled {
+		spRegistry = softprobe.SharedReplayRegistry()
+	}
 	promMgr := &connector.PrometheusManager{}
 	ctxInfo := &global.ContextInfo{
-		Prometheus:          promMgr,
-		OTELMetricsExporter: &otelcfg.MetricsExporterInstancer{Cfg: &config.OTELMetrics},
-		EBPFReverseDNS:      rdns.NewEBPFLookup(ctx, &config.EBPF, &config.NetworkFlows.ReverseDNS, &config.Stats.ReverseDNS),
+		Prometheus:              promMgr,
+		OTELMetricsExporter:     &otelcfg.MetricsExporterInstancer{Cfg: &config.OTELMetrics},
+		EBPFReverseDNS:          rdns.NewEBPFLookup(ctx, &config.EBPF, &config.NetworkFlows.ReverseDNS, &config.Stats.ReverseDNS),
+		SoftprobeConfig:         config.Softprobe,
+		SoftprobeReplayRegistry: spRegistry,
 	}
 	// Node metadata must be resolved before the internal-metrics reporter is
 	// created, so the reporter's OTLP resource carries host metadata (host.id,

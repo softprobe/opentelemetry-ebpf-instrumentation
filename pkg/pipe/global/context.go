@@ -26,6 +26,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/metadata"
 	"go.opentelemetry.io/obi/pkg/pipe/msg"
 	"go.opentelemetry.io/obi/pkg/selection"
+	"go.opentelemetry.io/obi/pkg/softprobe"
 )
 
 // ContextInfo stores some context information that must be shared across some nodes of the
@@ -87,6 +88,9 @@ type ContextInfo struct {
 	// the runtime-selected targets for each signal view. Pass via instrumenter.WithDynamicSelector.
 	DynamicSelector selection.MultiSignalPIDSelector
 	CriteriaUpdates *services.CriteriaUpdates
+
+	SoftprobeConfig         softprobe.Config
+	SoftprobeReplayRegistry *softprobe.ReplayRegistry
 }
 
 // AppO11y stores context information that is only required for application observability.

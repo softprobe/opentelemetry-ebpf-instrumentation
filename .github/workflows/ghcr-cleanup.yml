@@ -1,0 +1,26 @@
+name: Cleanup old GHCR CI images
+
+on:
+  schedule:
+    - cron: "17 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Prune old sp-obi CI tags
+    if: github.repository == 'softprobe/opentelemetry-ebpf-instrumentation'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Prune sha, pr, and ci tags older than 21 days
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          package: sp-obi
+          delete-tags: sha-*,pr-*,ci-*
+          exclude-tags: main,latest,buildcache,edge-main
+          older-than: 21d

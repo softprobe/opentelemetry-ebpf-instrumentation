@@ -91,6 +91,10 @@ func TestAllowPIDFollowsLogEnricherSelection(t *testing.T) {
 
 	assert.Contains(t, tr.trackedPids, testPIDSelected)
 	assert.Same(t, selected, tr.pidServices[testPIDSelected])
+
+	selfPID := uint32(os.Getpid())
+	tr.AllowPID(app.PID(selfPID), 1, selected)
+	assert.NotContains(t, tr.trackedPids, selfPID)
 }
 
 func TestBlockPIDClearsNamespacedPIDCache(t *testing.T) {
