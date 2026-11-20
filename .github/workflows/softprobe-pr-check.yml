@@ -11,8 +11,12 @@ concurrency:
   group: softprobe-pr-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   go-check:
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +32,7 @@ jobs:
         run: GOOS=linux GOARCH=amd64 go build -o /tmp/obi ./cmd/obi
 
   java-agent-check:
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,3 +45,124 @@ jobs:
             -w /src/pkg/internal/java \
             gradle:9.8.2-jdk21-noble \
             gradle :agent:test --no-daemon
+
+  publish-ci-image:
+    name: Build and publish Softprobe OBI image
+    needs: [go-check, java-agent-check]
+    if: >-
+      github.repository == 'softprobe/opentelemetry-ebpf-instrumentation' &&
+      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == 'softprobe/opentelemetry-ebpf-instrumentation')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write # publish sp-obi CI image to GHCR
+    outputs:
+      target_sha: ${{ steps.vars.outputs.target_sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Compute target SHA
+        id: vars
+        run: |
+          full_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          {
+            echo "target_sha=${full_sha}"
+            echo "short_sha=${short_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}/sp-obi
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=sha-${{ steps.vars.outputs.target_sha }}
+            type=raw,value=sha-${{ steps.vars.outputs.short_sha }}
+            type=ref,event=branch,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=pr
+
+      - name: Build and push Softprobe OBI image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}/sp-obi:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}/sp-obi:buildcache,mode=max
+          build-args: |
+            RELEASE_VERSION=${{ steps.vars.outputs.short_sha }}
+            RELEASE_REVISION=${{ steps.vars.outputs.short_sha }}
+            SP_OBI_REV=${{ steps.vars.outputs.target_sha }}
+
+      - name: Verify public unauthenticated GHCR pull
+        env:
+          IMAGE_REF: ghcr.io/${{ github.repository }}/sp-obi:sha-${{ steps.vars.outputs.target_sha }}
+        run: |
+          tmp_docker_config="$(mktemp -d)"
+          trap 'rm -rf "${tmp_docker_config}"' EXIT
+          if ! DOCKER_CONFIG="${tmp_docker_config}" docker manifest inspect "${IMAGE_REF}" >/dev/null; then
+            echo "::error::${IMAGE_REF} is not publicly pullable without authentication; set GHCR package visibility to Public in GitHub org package settings."
+            exit 1
+          fi
+
+  dispatch-system-e2e:
+    name: Trigger Softprobe System E2E
+    needs: publish-ci-image
+    if: github.repository == 'softprobe/opentelemetry-ebpf-instrumentation'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Dispatch system-e2e workflow when org token is configured
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          TARGET_SHA: ${{ needs.publish-ci-image.outputs.target_sha }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "GH_PAT secret is not configured on this public repository; skipping cross-repo dispatch to private softprobe/dev."
+            exit 0
+          fi
+          dispatch_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run system-e2e.yml \
+            --repo softprobe/dev \
+            -f override_repo=sp-obi \
+            -f override_ref="sha-${TARGET_SHA}"
+          run_id=""
+          for _ in $(seq 1 24); do
+            sleep 5
+            run_id="$(gh run list \
+              --repo softprobe/dev \
+              --workflow system-e2e.yml \
+              --event workflow_dispatch \
+              --limit 10 \
+              --json databaseId,createdAt,displayTitle \
+              --jq "[.[] | select(.createdAt >= \"${dispatch_ts}\")][0].databaseId // empty")"
+            if [ -n "${run_id}" ]; then
+              break
+            fi
+          done
+          if [ -z "${run_id}" ]; then
+            echo "Failed to locate dispatched system-e2e run on softprobe/dev." >&2
+            exit 1
+          fi
+          gh run watch "${run_id}" --repo softprobe/dev --exit-status
