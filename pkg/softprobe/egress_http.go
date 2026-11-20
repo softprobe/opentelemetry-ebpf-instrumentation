@@ -34,7 +34,7 @@ const (
 	ErrorCodeMockMiss    = "MOCK_MISS"
 	ErrorCodeQueryError  = "QUERY_ERROR"
 
-	writeContextPollBudget = 15 * time.Millisecond
+	writeContextPollBudget = 100 * time.Millisecond
 	writeContextPollStep   = 250 * time.Microsecond
 	defaultUpstreamTimeout = 30 * time.Second
 )
@@ -519,8 +519,7 @@ func (h *HTTPProtocolHandler) resolvePostForwardTrace(
 	if sockCookie == 0 || h.writeTracker == nil {
 		return [16]byte{}, false
 	}
-	pollEnd := max(rawEnd, 1)
-	if wctx, ok := h.writeTracker.LookupInRange(sockCookie, rawStart, pollEnd); ok && wctx.TraceID != ([16]byte{}) {
+	if wctx, ok := lookupWriteInFrameRange(h.writeTracker, sockCookie, rawStart, rawEnd); ok && wctx.TraceID != ([16]byte{}) {
 		return wctx.TraceID, true
 	}
 	deadline := time.Now().Add(5 * time.Millisecond)
@@ -529,7 +528,7 @@ func (h *HTTPProtocolHandler) resolvePostForwardTrace(
 			break
 		}
 		time.Sleep(writeContextPollStep)
-		if wctx, ok := h.writeTracker.LookupInRange(sockCookie, rawStart, pollEnd); ok && wctx.TraceID != ([16]byte{}) {
+		if wctx, ok := lookupWriteInFrameRange(h.writeTracker, sockCookie, rawStart, rawEnd); ok && wctx.TraceID != ([16]byte{}) {
 			return wctx.TraceID, true
 		}
 	}
@@ -638,7 +637,7 @@ func (h *HTTPProtocolHandler) resolveOutboundTrace(
 		return fallbackTraceID, fallbackSpanID, hasFallback
 	}
 
-	if wctx, ok := h.writeTracker.LookupInRange(sockCookie, rawStart, rawEnd); ok && wctx.TraceID != ([16]byte{}) {
+	if wctx, ok := lookupWriteInFrameRange(h.writeTracker, sockCookie, rawStart, rawEnd); ok && wctx.TraceID != ([16]byte{}) {
 		return wctx.TraceID, wctx.ServerSpanID, true
 	}
 
@@ -649,8 +648,7 @@ func (h *HTTPProtocolHandler) resolveOutboundTrace(
 				break
 			}
 			time.Sleep(writeContextPollStep)
-			pollEnd := max(rawEnd, 1)
-			if wctx, ok := h.writeTracker.LookupInRange(sockCookie, rawStart, pollEnd); ok && wctx.TraceID != ([16]byte{}) {
+			if wctx, ok := lookupWriteInFrameRange(h.writeTracker, sockCookie, rawStart, rawEnd); ok && wctx.TraceID != ([16]byte{}) {
 				return wctx.TraceID, wctx.ServerSpanID, true
 			}
 		}

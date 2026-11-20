@@ -1281,3 +1281,54 @@ func TestRuntimeEgressServerSpeaksFirstHandlerDispatch(t *testing.T) {
 	assert.Equal(t, "port-fallback-greeting\n", fallbackGreeting)
 	assert.Equal(t, 0, <-emptyPreambleHandler.peekLenCh)
 }
+
+func TestHTTPResolveOutboundTraceRejectsStalePooledWriteContext(t *testing.T) {
+	registry := NewReplayRegistry(32, time.Minute)
+	tracker := NewWriteContextTracker(64, time.Minute)
+
+	trace1 := makeTraceID(0x71)
+	span1 := makeSpanID(0x71)
+	trace2 := makeTraceID(0x72)
+	span2 := makeSpanID(0x72)
+
+	registry.Register(trace1, ReplaySession{
+		Mode:            ModeReplay,
+		RecordedTraceID: FormatTraceIDHex(trace1),
+		ReplayID:        "rep-1",
+	})
+	registry.Register(trace2, ReplaySession{
+		Mode:            ModeReplay,
+		RecordedTraceID: FormatTraceIDHex(trace2),
+		ReplayID:        "rep-2",
+	})
+
+	const cookie = uint64(0x998877)
+	tracker.RecordWrite(SocketWriteContext{
+		SockCookie:   cookie,
+		ByteOffset:   180,
+		PayloadLen:   220,
+		TraceID:      trace1,
+		ServerSpanID: span1,
+	})
+
+	handler := NewHTTPProtocolHandler(Config{}, nil, registry, tracker, nil)
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		tracker.RecordWrite(SocketWriteContext{
+			SockCookie:   cookie,
+			ByteOffset:   400,
+			PayloadLen:   210,
+			TraceID:      trace2,
+			ServerSpanID: span2,
+		})
+	}()
+
+	gotTrace, gotSpan, ok := handler.resolveOutboundTrace(t.Context(), http.Header{}, cookie, 400, 610)
+	require.True(t, ok)
+	assert.Equal(t, trace2, gotTrace)
+	assert.Equal(t, span2, gotSpan)
+
+	_, ok = handler.resolvePostForwardTrace(t.Context(), cookie, 610, 820)
+	assert.False(t, ok)
+}
