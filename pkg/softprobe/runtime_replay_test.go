@@ -1423,3 +1423,84 @@ func TestHTTPHandleTLSConnectionCorrelatesCoalescedFirstRequest(t *testing.T) {
 	assert.Equal(t, `{"order":"B335QK"}`, string(captured.RequestBody))
 	assert.Equal(t, `{"status":"CONFIRMED"}`, string(captured.ResponseBody))
 }
+
+func TestRuntimeInterceptsDelayedTLSClientHello(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<OrderViewRS><OrderID>ORD-DELAYED</OrderID></OrderViewRS>`))
+	}))
+	defer upstream.Close()
+
+	origDst := netip.MustParseAddrPort(upstream.Listener.Addr().String())
+	tracker := NewWriteContextTracker(0, 0)
+	bridge := NewDataplaneBridge(tracker)
+	liveTrace := makeTraceID(0x99)
+	liveSpan := makeSpanID(0x99)
+	const cookie = uint64(0x99887766)
+
+	lnEgressProbe, err := ListenNonMPTCP(context.Background(), "tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	egressPort := int(extractPortFromAddr(lnEgressProbe.Addr()))
+	_ = lnEgressProbe.Close()
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.AppID = "travel-ota"
+	cfg.IngressProxyPort = -1
+	cfg.EgressProxyPort = egressPort
+
+	rt, err := NewRuntime(
+		cfg,
+		WithRuntimeCACertPath(""),
+		WithRuntimeDataplaneBridge(bridge),
+		WithRuntimeHTTPHandlerOptions(WithUpstreamTLSConfig(&tls.Config{InsecureSkipVerify: true})),
+		WithRuntimeEgressTargetResolver(func(net.Addr) (EgressTarget, bool) {
+			return EgressTarget{
+				SockCookie: cookie,
+				AddrPort:   origDst,
+				PID:        1234,
+			}, true
+		}),
+	)
+	require.NoError(t, err)
+	require.NoError(t, rt.Start(t.Context()))
+	defer func() { _ = rt.Close() }()
+
+	rawConn, err := net.Dial("tcp", rt.EgressAddr().String())
+	require.NoError(t, err)
+
+	// Simulate slow JVM SSLContext initialization after TCP connect completes (>200ms).
+	time.Sleep(300 * time.Millisecond)
+
+	tlsClient := tls.Client(rawConn, &tls.Config{
+		RootCAs:    rt.CA().CertPool(),
+		ServerName: "127.0.0.1",
+		NextProtos: []string{"http/1.1"},
+	})
+	require.NoError(t, tlsClient.Handshake())
+
+	tracker.RecordWrite(SocketWriteContext{
+		SockCookie:   cookie,
+		ByteOffset:   0,
+		PayloadLen:   256,
+		TraceID:      liveTrace,
+		ServerSpanID: liveSpan,
+	})
+
+	req, err := http.NewRequest(http.MethodPost, "https://127.0.0.1/ndc/v21.3/orderchange", strings.NewReader(`<OrderChangeRQ/>`))
+	require.NoError(t, err)
+	require.NoError(t, req.Write(tlsClient))
+
+	resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, `<OrderViewRS><OrderID>ORD-DELAYED</OrderID></OrderViewRS>`, string(body))
+
+	_ = tlsClient.Close()
+
+	captured, ok := bridge.ExchangeCache().ConsumeHTTPClient(liveTrace, http.MethodPost, "/ndc/v21.3/orderchange")
+	require.True(t, ok, "delayed TLS ClientHello must still be intercepted by HTTPProtocolHandler")
+	assert.Equal(t, `<OrderViewRS><OrderID>ORD-DELAYED</OrderID></OrderViewRS>`, string(captured.ResponseBody))
+}

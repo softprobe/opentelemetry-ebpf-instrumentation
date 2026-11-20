@@ -25,6 +25,8 @@ import (
 const (
 	defaultHeartbeatInterval = 30 * time.Second
 	defaultHeartbeatTimeout  = 5 * time.Second
+	defaultEgressPeekTimeout = time.Second
+	defaultTLSPeekTimeout    = 5 * time.Second
 )
 
 type RuntimeOption func(*Runtime)
@@ -525,7 +527,11 @@ func (r *Runtime) handleEgressConn(ctx context.Context, rawConn net.Conn) {
 
 	var peek []byte
 	if !serverFirst {
-		_ = rawConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		peekTimeout := defaultEgressPeekTimeout
+		if origPort == 443 {
+			peekTimeout = defaultTLSPeekTimeout
+		}
+		_ = rawConn.SetReadDeadline(time.Now().Add(peekTimeout))
 		peek, _ = br.Peek(min(defaultProxyBufSize, 8))
 		_ = rawConn.SetReadDeadline(time.Time{})
 	}

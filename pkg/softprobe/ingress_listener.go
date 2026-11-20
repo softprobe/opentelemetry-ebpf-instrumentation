@@ -228,7 +228,7 @@ func (l *IngressListener) handleConn(ctx context.Context, inConn net.Conn) {
 	}
 
 	inBuf := bufio.NewReaderSize(inConn, defaultProxyBufSize)
-	_ = inConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	_ = inConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	peek, err := inBuf.Peek(min(defaultProxyBufSize, 4))
 	_ = inConn.SetReadDeadline(time.Time{})
 	var netErr net.Error
